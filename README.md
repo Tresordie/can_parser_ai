@@ -127,9 +127,6 @@ can_parser/
 ├── build.sh             # Linux / macOS build script
 ├── requirements.txt     # Python dependencies
 ├── can-bus.png          # Application icon
-├── cosmo.dbc            # Example DBC (EV, 191 messages)
-├── num8_combined.asc    # Example ASC log
-└── #8 log data 20260602/ # Example log directory
 ```
 
 ## Architecture
