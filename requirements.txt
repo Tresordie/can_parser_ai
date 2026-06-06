@@ -1,0 +1,6 @@
+PyQt5>=5.15
+python-can>=4.3
+cantools>=39.0
+matplotlib>=3.7
+uptime>=3.0
+pyinstaller>=6.0
