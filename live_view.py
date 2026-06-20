@@ -5,6 +5,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QPushButton, QFileDialog, QHeaderView, QLabel,
+    QSpinBox,
 )
 from signal_plot import SignalPlot
 
@@ -48,9 +49,16 @@ class LiveView(QWidget):
         self._save_btn.clicked.connect(self._save_csv)
         btn_layout.addWidget(self._save_btn)
 
-        self._plot_timer_label = QLabel("Plot refresh: 1 Hz")
-        btn_layout.addWidget(self._plot_timer_label)
         btn_layout.addStretch()
+
+        btn_layout.addWidget(QLabel("Legend:"))
+        self._legend_size = QSpinBox()
+        self._legend_size.setRange(4, 20)
+        self._legend_size.setValue(8)
+        self._legend_size.setFixedWidth(48)
+        self._legend_size.setFixedHeight(24)
+        self._legend_size.valueChanged.connect(self._plot.set_legend_fontsize)
+        btn_layout.addWidget(self._legend_size)
 
         layout.addLayout(btn_layout)
 
@@ -156,6 +164,9 @@ class LiveView(QWidget):
 
     def flush_buffer(self):
         self._flush_buffer()
+
+    def add_signal_instance(self, can_id, sig_name):
+        self._plot.add_signal_instance(can_id, sig_name)
 
     def _clear(self):
         self._msg_buffer.clear()

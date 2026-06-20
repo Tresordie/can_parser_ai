@@ -274,8 +274,10 @@ class CanBackend(QObject):
             msg_def = self._dbc.get_message_by_frame_id(can_id)
             if len(msg.data) < msg_def.length:
                 return None
-            all_decoded = msg_def.decode(msg.data)
-            decoded = {sig_name: _plain_value(v) for sig_name, v in all_decoded.items()}
+            decoded = {}
+            for sig_name in self._signal_cache[can_id]:
+                sig = msg_def.get_signal_by_name(sig_name)
+                decoded[sig_name] = _plain_value(sig.decode(msg.data))
             return decoded if decoded else None
         except Exception:
             return None
@@ -355,15 +357,15 @@ class _PlaybackThread(QThread):
 
         self.parsed_ready.emit(parsed)
 
-        base_ts = messages[0].timestamp
+        base_ts = parsed[0][0]
         base_wall = time.time()
 
-        for msg in messages:
+        for ts, decoded in parsed:
             if self._stop:
                 return
-            offset = msg.timestamp - base_ts
+            offset = ts - base_ts
             target = base_wall + offset / self._speed
             delay = target - time.time()
             if delay > 0.001:
                 self.msleep(int(delay * 1000))
-            self.message_ready.emit(msg)
+            self.message_with_data.emit(_FakeMsg(ts), decoded)

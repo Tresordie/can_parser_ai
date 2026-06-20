@@ -3,10 +3,6 @@
 import os
 import sys
 
-from can_backend import CanBackend
-from dbc_loader import DbcLoader
-from live_view import LiveView
-from log_view import LogView
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -17,6 +13,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -27,6 +24,11 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from can_backend import CanBackend
+from dbc_loader import DbcLoader
+from live_view import LiveView
+from log_view import LogView
 from workers import CanWorker
 
 STYLESHEET = """
@@ -47,7 +49,7 @@ QComboBox {
     border: 1px solid #dee2e6; border-radius: 5px;
     padding: 3px 8px; font-size: 12px; min-width: 100px;
 }
-QComboBox:hover { border-color: #adb5bd; }
+QComboBox:hover { border-color: #adb5bd; }s
 QComboBox:focus { border-color: #4263eb; }
 QComboBox::drop-down { border: none; width: 20px; }
 QComboBox QAbstractItemView {
@@ -58,7 +60,7 @@ QComboBox QAbstractItemView {
 QPushButton {
     background-color: #e8edf5; color: #4263eb;
     border: 1px solid #d5ddf0; border-radius: 5px;
-    padding: 5px 14px; font-size: 12px; font-weight: 600;
+    padding: 5px 14px; font-size: 12px; font-weight: 600;s
 }
 QPushButton:hover { background-color: #dbe4f2; }
 QPushButton:pressed { background-color: #cdd8eb; }
@@ -109,7 +111,8 @@ QTabBar::tab:selected {
     border-bottom: 2px solid #4263eb;
 }
 QTabBar::tab:hover:!selected { color: #495057; background-color: #e9ecef; }
-QSplitter::handle { background-color: #e9ecef; width: 2px; }
+QSplitter::handle { background-color: #ced4da; width: 6px; border-radius: 2px; }
+QSplitter::handle:hover { background-color: #4263eb; }
 QStatusBar {
     background-color: #ffffff; color: #868e96;
     border-top: 1px solid #e9ecef; font-size: 11px; padding: 2px 8px;
@@ -334,6 +337,8 @@ class MainWindow(QMainWindow):
         self._tree_view = QTreeView()
         self._tree_view.setModel(self._dbc_loader.model)
         self._tree_view.setAlternatingRowColors(True)
+        self._tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._tree_view.customContextMenuRequested.connect(self._on_tree_context_menu)
         self._tree_view.expandAll()
         ll.addWidget(self._tree_view)
 
@@ -346,7 +351,9 @@ class MainWindow(QMainWindow):
         rl.addWidget(self._log_view)
 
         splitter.addWidget(right)
-        splitter.setSizes([320, 1060])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setSizes([280, 1100])
 
         layout.addWidget(splitter)
 
@@ -404,7 +411,15 @@ class MainWindow(QMainWindow):
 
     def _on_tree_check_changed(self, item):
         self._dbc_loader.cascade_check_state(item)
-        self._sync_checked_signals()
+        # debounce: batch rapid checkbox changes into a single sync
+        if not hasattr(self, "_sync_timer"):
+            from PyQt5.QtCore import QTimer
+
+            self._sync_timer = QTimer(self)
+            self._sync_timer.setSingleShot(True)
+            self._sync_timer.timeout.connect(self._sync_checked_signals)
+        self._sync_timer.stop()
+        self._sync_timer.start(80)
 
     def _on_search(self, text):
         text = text.strip().lower()
@@ -447,6 +462,23 @@ class MainWindow(QMainWindow):
     def _on_deselect_all(self):
         self._dbc_loader.deselect_all()
         self._sync_checked_signals()
+
+    def _on_tree_context_menu(self, pos):
+        idx = self._tree_view.indexAt(pos)
+        if not idx.isValid():
+            return
+        item = self._dbc_loader.model.itemFromIndex(idx)
+        item_type = item.data(self._dbc_loader.CHECKED_ROLE)
+        if item_type != self._dbc_loader.ITEM_TYPE_SIGNAL:
+            return
+        can_id = item.data(self._dbc_loader.CAN_ID_ROLE)
+        sig_name = item.text()
+        menu = QMenu(self)
+        action = menu.addAction(f'Add copy of "{sig_name}" to plot')
+        action.triggered.connect(
+            lambda: self._live_view.add_signal_instance(can_id, sig_name)
+        )
+        menu.exec_(self._tree_view.viewport().mapToGlobal(pos))
 
     def _start(self):
         channel = self._channel_combo.currentText()
@@ -491,6 +523,11 @@ class MainWindow(QMainWindow):
         if not filepath:
             self._status_label.setText("No log file selected")
             return
+        # flush any pending debounce so signal cache is current
+        if hasattr(self, "_sync_timer") and self._sync_timer.isActive():
+            self._sync_timer.stop()
+        self._live_view._clear()
+        self._sync_checked_signals()
         self._backend.start_playback(filepath)
         self._log_view.set_playing(True)
         self._start_btn.setEnabled(False)
@@ -521,4 +558,5 @@ def main():
 
 
 if __name__ == "__main__":
+    main()
     main()

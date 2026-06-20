@@ -127,6 +127,9 @@ can_parser/
 ├── build.sh             # Linux / macOS 构建脚本
 ├── requirements.txt     # Python 依赖
 ├── can-bus.png          # 应用图标
+├── cosmo.dbc            # 示例 DBC（电动车，191 条报文）
+├── num8_combined.asc    # 示例 ASC 日志
+└── #8 log data 20260602/ # 示例日志目录
 ```
 
 ## 架构说明
