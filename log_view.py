@@ -28,7 +28,7 @@ class LogView(QWidget):
         self._path_edit.setPlaceholderText("Select CAN log file (.asc, .csv, .blf)...")
         layout.addWidget(self._path_edit, 1)
 
-        self._play_btn = QPushButton("Play")
+        self._play_btn = QPushButton("Parse")
         self._play_btn.setFixedHeight(28)
         self._play_btn.setEnabled(False)
         self._play_btn.clicked.connect(self.play_requested.emit)

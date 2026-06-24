@@ -19,6 +19,7 @@ A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and of
 - Python 3.8+
 - Windows 10+ (PCAN driver requirement)
 - PEAK PCAN-USB hardware (required for live capture only; playback mode works without hardware)
+- See [CHANGELOG.md](CHANGELOG.md) for detailed release notes
 
 ## Installation
 
@@ -97,16 +98,12 @@ On the Data Table tab, click **Save CSV** to export the current table data.
 
 ## Standalone Builds
 
-Pre-built standalone executables are available for Windows, Linux, and macOS. No Python installation required.
+Pre-built standalone executables can be generated via PyInstaller.
 
 ### Building from source
 
 ```bash
-# Windows
-build.bat
-
-# Linux / macOS
-bash build.sh
+pyinstaller --onefile --windowed --icon=can-bus.png --name "CAN_Bus_Parser" main.py
 ```
 
 Output will be in `dist/CAN_Bus_Parser/`.
@@ -116,20 +113,17 @@ Output will be in `dist/CAN_Bus_Parser/`.
 ```
 can_parser/
 ├── main.py              # Entry point, main window, title bar, toolbar, status bar, stylesheet
-├── can_backend.py       # CAN backend: PCAN capture, multi-format playback, signal decoding
-├── dbc_loader.py        # DBC file loader, tree signal model, cascading checkbox logic
-├── live_view.py         # Live data view: data table + signal plot tabs
+├── can_backend.py       # CAN backend: PCAN capture, multi-format playback, signal decoding, index
+├── dbc_loader.py        # DBC file loader, tree signal model, cascading checkbox logic, mux support
+├── live_view.py         # Live data view: data table + signal plot tabs, CSV export
 ├── log_view.py          # Log playback control panel
-├── signal_plot.py       # Matplotlib interactive signal time-series plot
+├── signal_plot.py       # Matplotlib interactive signal time-series plot (blitting + downsampling)
 ├── workers.py           # Background polling thread
-├── can_parser.spec      # PyInstaller spec for cross-platform standalone builds
-├── build.bat            # Windows build script
-├── build.sh             # Linux / macOS build script
 ├── requirements.txt     # Python dependencies
 ├── can-bus.png          # Application icon
 ├── cosmo.dbc            # Example DBC (EV, 191 messages)
 ├── num8_combined.asc    # Example ASC log
-└── #8 log data 20260602/ # Example log directory
+└── CHANGELOG.md         # Detailed release notes
 ```
 
 ## Architecture
@@ -138,11 +132,12 @@ can_parser/
 main.py (MainWindow)
   ├── DbcLoader: DBC parsing → QStandardItemModel → QTreeView
   ├── CanBackend: python-can wrapper, capture/playback/decode
-  │     ├── CanWorker: background polling thread
-  │     └── _PlaybackThread: log playback thread
+  │     ├── CanWorker: background polling thread (live mode)
+  │     ├── _ParseThread: background full-log decoder → signal index
+  │     └── _ReplayThread: timestamp-driven playback from decoded index
   ├── LiveView: QTabWidget
   │     ├── Data Table (QTableWidget): live signal values, 100ms buffer flush
-  │     └── Signal Plot (SignalPlot): Matplotlib interactive chart
+  │     └── Signal Plot (SignalPlot): Matplotlib interactive chart with blitting
   └── LogView: log file selection + play/stop controls
 ```
 
@@ -167,22 +162,32 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 - No CAN FD support
 - No UDS diagnostics
 - Playback speed is fixed at 1x
-- Signal plot displays up to 50,000 data points (auto-downsamples beyond that)
-- Data table retains up to 1,000 rows
+- Signal plot displays up to 10,000 data points in visible range (auto-downsamples beyond that)
+- Data table retains up to 1,000 rows (most recent)
 - Windows only for live capture (PCAN driver limitation); playback works cross-platform
 
 ## Changelog
 
+See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.1 (2026-06-24)
+
+- **Fix:** Legend highlight toggle bug — `_on_click` + `_on_pick` double-fire on single click no longer cancels highlight
+- **Fix:** Clicking empty plot area now properly updates visual state (missing `_canvas.draw()` added)
+- **Verify:** Legend ↔ plot ↔ tree three-way highlight sync confirmed stable
+- **Verify:** Integration test script (`_verify_legend_sync.py`) added
+
 ### v0.1 (2026-06-06)
 
 - PCAN live capture with DBC signal decoding
-- ASC / BLF / TRC / CSV log playback
-- Tree-based signal search and batch selection
-- Real-time data table with CSV export
-- Interactive signal plot (zoom/pan/axis lock/legend highlight)
-- Frameless custom title bar with app icon
-- FiraCode Nerd Font monospace, light theme
-- Cross-platform standalone builds via PyInstaller
+- ASC / BLF / TRC / CSV log playback with pre-decoded signal index
+- Tree-based signal search, batch selection, and cascading checkbox logic
+- Real-time data table with dual-mode CSV export (raw frames / decoded signals)
+- Interactive signal plot (zoom/pan/axis lock/legend highlight) with blitting + view-aware downsampling
+- Frameless custom title bar with app icon and glow shadow
+- Dark theme (GitHub Dark inspired), Segoe UI font
+- Multiplexed signal support, signal instance duplicates, legend font size control
+- PyInstaller standalone executable support
 
 ## License
 
