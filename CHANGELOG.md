@@ -2,6 +2,36 @@
 
 ---
 
+## v0.1.2 (2026-06-26) — Bug 修复 / Bug Fixes
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 1. 多路复用报文短帧无法解码（严重）
+**问题：** 当 CAN 日志中某帧的 DLC 小于 DBC 定义的消息长度时（例如 `MC_EcuInfo` 定义 8 字节但实际 DLC=3 或 DLC=4），该帧被直接丢弃，导致 `MC_EcuInfoMultiplexor: 0` 和 `MC_EcuInfoMultiplexor: 12` 对应的信号完全无法解析。
+
+**原因：** `_ParseThread.run()` 和 `_decode()` 两处均使用严格的 `len(msg.data) >= msg_def.length` 校验，拒绝了所有 DLC 小于 DBC 定义长度的帧。
+
+**修复：** 移除严格长度校验。 `_decode()` 改为仅检查 `len(msg.data) == 0`；`_ParseThread.run()` 改为仅检查 `len(msg.data) > 0`。`cantools.decode(allow_truncated=True)` 会安全处理数据不足的情况。
+
+> 涉及文件：`can_backend.py` — `_decode()`, `_ParseThread.run()`
+
+#### 2. 回放模式下点击 Stop 程序崩溃退出（严重）
+**问题：** 日志解析完成后点击 Stop 按钮，程序自动退出并报 `QThread: Destroyed while thread is still running`。
+
+**原因：**
+- 工具栏 Stop 按钮（`_stop()`）在 playback 模式下不做任何操作，无法停止回放
+- `_stop_internal_threads()` 在停止线程前未断开信号连接，`QThread.finished` 信号在 `deleteLater()` 后仍被处理，导致线程对象在"已调度删除"状态下被重复操作
+
+**修复：**
+- `_stop_internal_threads()` 在 `stop()`/`wait()` 前先 `disconnect` 信号（`finished`, `parsed_ready`, `message_with_data`），消除竞态条件
+- `_on_playback_done()` 增加 `if not self._running: return` 守卫，防止重复发射 `stopped`
+- 工具栏 `_stop()` 在 playback 模式下正确委托给 `_stop_playback()` 执行清理
+
+> 涉及文件：`can_backend.py` — `_stop_internal_threads()`, `_on_playback_done()`<br>
+> 涉及文件：`main.py` — `_stop()`
+
+---
+
 ## v0.1.1 (2026-06-24) — Bug 修复与增强 / Bug Fixes & Enhancements
 
 ### 🐛 Bug 修复 / Bug Fixes

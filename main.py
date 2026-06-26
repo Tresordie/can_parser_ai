@@ -710,9 +710,11 @@ class MainWindow(QMainWindow):
         )
 
     def _stop(self):
-        """Toolbar Stop — stops PCAN live capture (if active)."""
+        """Toolbar Stop — stops live capture or log playback."""
         mode = self._backend.mode()
-        if mode == 'live':
+        if mode == 'playback':
+            self._stop_playback()
+        elif mode == 'live':
             self._backend.stop()
             if self._worker:
                 self._worker.stop()

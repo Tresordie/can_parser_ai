@@ -170,6 +170,12 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
 
+### v0.1.2 (2026-06-26)
+
+- **Fix:** Short DLC frames in multiplexed messages (e.g. `MC_EcuInfo` DLC=3/4 vs DBC-defined 8) are now decoded instead of silently dropped
+- **Fix:** Stop button crash after log playback (`QThread: Destroyed while thread is still running`) — signal disconnection before thread cleanup + `_stop()` now handles playback mode
+- **Fix:** Toolbar Stop button now correctly stops log playback in addition to live capture
+
 ### v0.1.1 (2026-06-24)
 
 - **Fix:** Legend highlight toggle bug — `_on_click` + `_on_pick` double-fire on single click no longer cancels highlight

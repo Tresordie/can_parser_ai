@@ -170,6 +170,12 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
 
+### v0.1.2 (2026-06-26)
+
+- **修复：** 多路复用报文中 DLC 小于 DBC 定义长度的帧（如 `MC_EcuInfo` 定义 8 字节但实际 DLC=3/4）现在可以正确解码，不再被静默丢弃
+- **修复：** 日志回放后点击 Stop 按钮程序崩溃退出（`QThread: Destroyed while thread is still running`）— 线程清理前断开信号连接 + `_stop()` 现可正确处理回放模式
+- **修复：** 工具栏 Stop 按钮现可在回放模式和实时采集中正确停止
+
 ### v0.1.1 (2026-06-24)
 
 - **修复：** 图例高亮切换 Bug — `_on_click` + `_on_pick` 双击事件不再导致高亮被取消

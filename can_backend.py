@@ -433,15 +433,38 @@ class CanBackend(QObject):
             self.error_occurred.emit(f"Cannot start playback: {e}")
 
     def _stop_internal_threads(self):
-        """Stop and join any running parse/replay threads, dropping references."""
+        """Stop and join any running parse/replay threads, dropping references.
+
+        Disconnects signals *before* waiting so that the queued ``finished``
+        signal cannot re-enter ``_on_playback_done`` / ``_on_parse_thread_finished``
+        after we have already dropped the reference — this prevents the
+        "QThread: Destroyed while thread is still running" warning and the
+        double ``stopped`` emission that confuses the UI.
+        """
         if self._parse_thread:
             t = self._parse_thread
+            try:
+                t.finished.disconnect(self._on_parse_thread_finished)
+            except Exception:
+                pass
+            try:
+                t.parsed_ready.disconnect(self._on_parsed_ready)
+            except Exception:
+                pass
             t.stop()
             t.wait(10000)
             t.deleteLater()
             self._parse_thread = None
         if self._playback_thread:
             t = self._playback_thread
+            try:
+                t.finished.disconnect(self._on_playback_done)
+            except Exception:
+                pass
+            try:
+                t.message_with_data.disconnect(self._on_message_with_data)
+            except Exception:
+                pass
             t.stop()
             t.wait(10000)
             t.deleteLater()
@@ -488,6 +511,10 @@ class CanBackend(QObject):
 
     def _on_playback_done(self):
         # Clear the replay-thread reference now that run() has exited.
+        # Guard: if stop() was already called, _running is False and the
+        # reference has been cleared — nothing to do.
+        if not self._running:
+            return
         if self._playback_thread is not None:
             self._playback_thread.deleteLater()
             self._playback_thread = None
@@ -529,10 +556,10 @@ class CanBackend(QObject):
         if not wanted:
             return None
         msg_def = self._frame_id_map.get(can_id)
-        if msg_def is None or len(msg.data) < msg_def.length:
+        if msg_def is None or len(msg.data) == 0:
             return None
         try:
-            all_decoded = msg_def.decode(msg.data, decode_choices=False)
+            all_decoded = msg_def.decode(msg.data, decode_choices=False, allow_truncated=True)
         except Exception:
             return None
         decoded = {}
@@ -634,9 +661,9 @@ class _ParseThread(QThread):
                 return
             ts = msg.timestamp
             msg_def = frame_id_map.get(msg.arbitration_id)
-            if msg_def is not None and len(msg.data) >= msg_def.length:
+            if msg_def is not None and len(msg.data) > 0:
                 try:
-                    decoded = msg_def.decode(msg.data, decode_choices=False)
+                    decoded = msg_def.decode(msg.data, decode_choices=False, allow_truncated=True)
                 except Exception:
                     decoded = None
             else:
