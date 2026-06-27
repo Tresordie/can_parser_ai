@@ -2,6 +2,48 @@
 
 ---
 
+## v0.1.3 (2026-06-27) — Bug 修复与增强 / Bug Fixes & Enhancements
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 1. Stop 按钮导致程序崩溃退出（QThread 仍在运行时被销毁）— 严重
+
+共修复了三条触发该问题的代码路径：
+
+**a) 工具栏 Stop（实时模式）**
+`_stop()` 在设置 `self._worker = None` 前未等待 `CanWorker` 线程退出。线程最多需要 100ms（`CanWorker.run()` 中的 `time.sleep(0.1)`）才能响应停止信号——在此期间立即丢弃引用会触发 GC 销毁一个仍在运行的 QThread。
+
+**b) LogView Stop（回放模式）**
+`_stop_playback()` 从未接触 `self._worker`——若用户曾启动实时采集然后切换至回放模式，`CanWorker` 线程一直处于运行状态。点击 Stop 时仅清理了 `_ParseThread`/`_ReplayThread`，`CanWorker` 被遗漏，最终被 GC 销毁。
+
+**c) `_ReplayThread` 长间隔休眠**
+当 CAN 日志文件存在较大时间戳间隔（如数秒甚至数分钟的消息空白）时，`_ReplayThread.run()` 会为整个间隔调用单次 `msleep()`。点击 Stop 后，`wait(10000)` 的 10 秒超时远不足以覆盖长时间休眠——线程在 `msleep()` 中挂起时被销毁。
+
+**修复：**
+- `_stop()` (实时模式)：现在在丢弃引用前调用 `self._worker.wait(2000)`
+- `_stop_playback()` (回放模式)：现在也会停止 `CanWorker` 并 `wait(2000)`
+- `_ReplayThread.run()`：长时间休眠改为每次 100ms 的分块休眠，每块之间检查 `_stop` 标志，使 `wait()` 在约 100ms 内返回
+
+> 涉及文件：`main.py` — `_stop()`, `_stop_playback()`<br>
+> 涉及文件：`can_backend.py` — `_ReplayThread.run()`
+
+### ✨ 新增功能 / New Features
+
+#### 2. 信号图悬浮提示（Hover Tooltip）
+
+鼠标悬停在信号波形上时，自动显示十字准线（垂直虚线）和提示框，内容包含：
+- 信号名称（`CAN_ID/SignalName` 格式）
+- 精确时间戳（`t = x.xxxxxx s`）
+- 信号物理值（`v = xxxxx`）
+
+鼠标移出图表区域时，十字准线和提示框自动隐藏。
+
+采用 `np.searchsorted` 二分查找在所有信号的全分辨率数据中定位最近数据点，即使面对 750k+ 数据点 × 多个信号也能实现即时响应。提示框与 blitting 渲染管线正确集成，防止定时器驱动的图表刷新期间的闪烁。
+
+> 涉及文件：`signal_plot.py` — `__init__()`, `_on_hover()`, `update_plot()`
+
+---
+
 ## v0.1.2 (2026-06-26) — Bug 修复 / Bug Fixes
 
 ### 🐛 Bug 修复 / Bug Fixes

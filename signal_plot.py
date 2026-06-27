@@ -245,9 +245,22 @@ class SignalPlot(QWidget):
         # Force the first frame to capture a fresh background.
         self._invalidate_blit()
 
+        # Hover crosshair + tooltip
+        self._crosshair = self._ax.axvline(
+            0, color="#8b949e", linewidth=0.8, linestyle="--",
+            visible=False, animated=True,
+        )
+        self._tip = self._ax.text(
+            0, 0, "", fontsize=8, color="#e6edf3",
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="#161b22",
+                      edgecolor="#30363d", alpha=0.92),
+            visible=False, animated=True, zorder=200,
+        )
+
         self._canvas.mpl_connect("pick_event", self._on_pick)
         self._canvas.mpl_connect("button_press_event", self._on_click)
         self._canvas.mpl_connect("draw_event", self._on_draw)
+        self._canvas.mpl_connect("motion_notify_event", self._on_hover)
 
     # ------------------------------------------------------------------ #
     # Blitting helpers
@@ -515,6 +528,10 @@ class SignalPlot(QWidget):
         self._canvas.restore_region(self._background)
         for line in self._lines.values():
             ax.draw_artist(line)
+        if self._crosshair.get_visible():
+            ax.draw_artist(self._crosshair)
+        if self._tip.get_visible():
+            ax.draw_artist(self._tip)
         self._canvas.blit(self._ax.bbox)
 
     def _downsample(self, t, v):
@@ -543,6 +560,61 @@ class SignalPlot(QWidget):
         if idx[-1] != stop - 1:
             idx = np.append(idx, stop - 1)
         return t[idx], v[idx]
+
+    def _on_hover(self, event):
+        """Show crosshair + tooltip near the nearest data point on hover."""
+        if event.inaxes is None or not self._data:
+            self._crosshair.set_visible(False)
+            self._tip.set_visible(False)
+            self._canvas.draw_idle()
+            return
+
+        mx = event.xdata
+        if mx is None:
+            return
+
+        # Find the closest (t, v) across all loaded signals via binary search.
+        best_key = None
+        best_idx = 0
+        best_dist = float("inf")
+        for sig_key, entry in self._data.items():
+            t = entry["t"]
+            if t.size == 0:
+                continue
+            idx = int(np.searchsorted(t, mx))
+            if idx >= len(t):
+                idx = len(t) - 1
+            elif idx > 0 and abs(t[idx - 1] - mx) < abs(t[idx] - mx):
+                idx -= 1
+            d = abs(t[idx] - mx)
+            if d < best_dist:
+                best_dist = d
+                best_key = sig_key
+                best_idx = idx
+
+        if best_key is None:
+            self._crosshair.set_visible(False)
+            self._tip.set_visible(False)
+            self._canvas.draw_idle()
+            return
+
+        can_id, sig_name = best_key
+        entry = self._data[best_key]
+        tx = float(entry["t"][best_idx])
+        tv = float(entry["v"][best_idx])
+
+        self._crosshair.set_xdata([tx, tx])
+        self._crosshair.set_visible(True)
+
+        label = f"0x{can_id:03X}/{sig_name}\nt = {tx:.6f} s\nv = {tv:.6g}"
+        self._tip.set_text(label)
+        # Place the tooltip near the data point, clamped to the visible y-range.
+        y_lo, y_hi = self._ax.get_ylim()
+        ty = max(y_lo, min(y_hi, tv))
+        self._tip.set_position((tx, ty))
+        self._tip.set_visible(True)
+
+        self._canvas.draw_idle()
 
     def _on_click(self, event):
         # Check the legend first — it may overlap the axes or sit outside it,

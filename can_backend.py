@@ -743,5 +743,13 @@ class _ReplayThread(QThread):
             target = base_wall + offset / self._speed
             delay = target - time.time()
             if delay > 0.001:
-                self.msleep(int(delay * 1000))
+                # Sleep in 100 ms chunks so we can respond to stop() quickly
+                # even across large timestamp gaps in the log.
+                remaining_ms = int(delay * 1000)
+                while remaining_ms > 0 and not self._stop:
+                    chunk = min(remaining_ms, 100)
+                    self.msleep(chunk)
+                    remaining_ms -= chunk
+                if self._stop:
+                    return
             self.message_with_data.emit(_FakeMsg(ts), decoded)

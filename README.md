@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1
+# CAN Bus Parser v0.1.3
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -12,7 +12,7 @@ A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and of
 | **Offline Playback** | Replay ASC / BLF / TRC / CSV (signal) / CSV (SavvyCAN frame) log formats |
 | **Signal Selection** | Tree view of all messages and signals after DBC load, with search and batch select |
 | **Data Table** | Real-time scrolling table of selected signal values, with CSV export |
-| **Signal Plot** | Interactive time-series plot with zoom, pan, axis lock, and legend highlighting |
+| **Signal Plot** | Interactive time-series plot with zoom, pan, axis lock, legend highlight, and hover tooltip |
 
 ## Requirements
 
@@ -91,6 +91,7 @@ Supported log formats:
 - **Axis lock**: Click the x-axis (Time) or y-axis (Value) spine to lock zoom to that axis. Click again to unlock
 - **Drag pan**: Left-click and drag to pan the view
 - **Legend highlight**: Click a signal name in the legend to highlight that line and dim all others
+- **Hover tooltip**: Move the mouse over the waveform to see a crosshair and tooltip showing signal name, exact timestamp, and value at that point
 
 ### 5. Data Export
 
@@ -169,6 +170,13 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.3 (2026-06-27)
+
+- **Fix:** Stop button crash (`QThread: Destroyed while thread is still running`) fixed in all three code paths: live mode toolbar Stop, playback mode LogView Stop, and long sleep in `_ReplayThread`
+- **Fix:** `_ReplayThread` now sleeps in 100ms chunks with `_stop` flag checks, preventing `wait()` timeout on logs with large timestamp gaps
+- **Fix:** `_stop()` and `_stop_playback()` now properly `wait(2000)` for `CanWorker` thread before dropping the reference
+- **Feature:** Hover tooltip on signal plot — crosshair + tooltip showing signal name, timestamp, and value at mouse position
 
 ### v0.1.2 (2026-06-26)
 

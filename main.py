@@ -718,6 +718,7 @@ class MainWindow(QMainWindow):
             self._backend.stop()
             if self._worker:
                 self._worker.stop()
+                self._worker.wait(2000)
                 self._worker = None
             self._live_view.flush_buffer()
             self._start_btn.setEnabled(True)
@@ -727,6 +728,10 @@ class MainWindow(QMainWindow):
     def _stop_playback(self):
         """LogView Stop — stops local log parsing/replay only."""
         self._backend.stop()
+        if self._worker:
+            self._worker.stop()
+            self._worker.wait(2000)
+            self._worker = None
         self._live_view.flush_buffer()
         self._log_view.set_playing(False)
         self._status_label.setText("Playback stopped")
