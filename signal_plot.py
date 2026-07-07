@@ -620,7 +620,8 @@ class SignalPlot(QWidget):
         # Check the legend first — it may overlap the axes or sit outside it,
         # so we cannot rely on event.inaxes to decide whether the click hit a
         # legend entry.
-        if hasattr(self, '_legend') and self._legend is not None:
+        self._sync_legend()
+        if self._legend is not None:
             leg = self._legend
             if leg.contains(event)[0]:
                 for txt in leg.get_texts():
@@ -669,12 +670,14 @@ class SignalPlot(QWidget):
                 l.set_alpha(0.12)
                 l.set_zorder(1)
         label = line.get_label()
-        for txt in self._legend.get_texts():
-            if txt.get_text() == label:
-                txt.set_fontweight("bold")
-                txt.set_color(line.get_color())
-            else:
-                txt.set_alpha(0.2)
+        self._sync_legend()
+        if self._legend is not None:
+            for txt in self._legend.get_texts():
+                if txt.get_text() == label:
+                    txt.set_fontweight("bold")
+                    txt.set_color(line.get_color())
+                else:
+                    txt.set_alpha(0.2)
         # Legend/spine changes can't be blitted; do a full draw.
         self._invalidate_blit()
         self._canvas.draw()
@@ -697,13 +700,22 @@ class SignalPlot(QWidget):
         self._highlight(artist)
         self._emit_label_clicked(artist.get_label())
 
+    def _sync_legend(self):
+        """Sync ``self._legend`` with the current legend on the axes so text
+        modifications target the visible legend, not a stale one that may
+        have been removed by a prior ``_rebuild_legend`` call."""
+        leg = self._ax.get_legend()
+        if leg is not None:
+            self._legend = leg
+
     def _reset_highlight(self):
         for _key, line in self._lines.items():
             line.set_alpha(1.0)
             line.set_linewidth(1.2)
             line.set_zorder(2)
         self._picked_line = None
-        if hasattr(self, '_legend') and self._legend:
+        self._sync_legend()
+        if self._legend is not None:
             for txt in self._legend.get_texts():
                 txt.set_fontweight("normal")
                 txt.set_alpha(1.0)

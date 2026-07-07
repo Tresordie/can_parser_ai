@@ -27,6 +27,16 @@
 > 涉及文件：`main.py` — `_stop()`, `_stop_playback()`<br>
 > 涉及文件：`can_backend.py` — `_ReplayThread.run()`
 
+#### 3. 图例高亮残留 Bug — 选中新信号后旧信号图例未退出高亮（中等）
+
+**问题：** 在树形控件中点击选择一个信号时，信号图中的曲线正确切换高亮（新信号加粗、旧信号恢复正常），但图例（Legend）中新旧信号的文字同时保持粗体/着色——旧信号的高亮没有退出。
+
+**原因：** `_reset_highlight()` 和 `_highlight()` 方法直接使用 `self._legend` 引用来修改图例文字属性。当 `_rebuild_legend()` 被其他代码路径（如 `set_signals`、`add_signal_instance`、窗口大小调整）调用时，旧图例通过 `_legend.remove()` 从 matplotlib 坐标轴中移除，并创建新图例。若 `_reset_highlight()` 在 `_rebuild_legend()` 之后但在下一个 `draw_event` 同步之前运行，`self._legend` 可能指向一个已从坐标轴分离的图例对象——对其文字属性的修改不会反映在渲染中。而 `self._ax.get_legend()` 始终返回当前实际显示的图例。
+
+**修复：** 新增 `_sync_legend()` 辅助方法，在每次修改图例文字属性前从 `self._ax.get_legend()` 重新获取当前图例引用。在 `_reset_highlight()`、`_highlight()` 和 `_on_click()` 三处调用该方法，确保始终操作实际渲染的图例对象。同时将原有的 `hasattr` 守卫替换为 `_sync_legend()` 调用后加空值检查。
+
+> 涉及文件：`signal_plot.py` — `_sync_legend()`, `_reset_highlight()`, `_highlight()`, `_on_click()`
+
 ### ✨ 新增功能 / New Features
 
 #### 2. 信号图悬浮提示（Hover Tooltip）

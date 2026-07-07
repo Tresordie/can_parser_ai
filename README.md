@@ -176,6 +176,7 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 - **Fix:** Stop button crash (`QThread: Destroyed while thread is still running`) fixed in all three code paths: live mode toolbar Stop, playback mode LogView Stop, and long sleep in `_ReplayThread`
 - **Fix:** `_ReplayThread` now sleeps in 100ms chunks with `_stop` flag checks, preventing `wait()` timeout on logs with large timestamp gaps
 - **Fix:** `_stop()` and `_stop_playback()` now properly `wait(2000)` for `CanWorker` thread before dropping the reference
+- **Fix:** Legend highlight persistence — clicking a tree node to select a new signal now properly clears the previous signal's legend highlight via `_sync_legend()` helper
 - **Feature:** Hover tooltip on signal plot — crosshair + tooltip showing signal name, timestamp, and value at mouse position
 
 ### v0.1.2 (2026-06-26)
