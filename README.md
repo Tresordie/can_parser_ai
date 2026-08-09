@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.3
+# CAN Bus Parser v0.1.4
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -16,12 +16,24 @@ A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and of
 
 ## Requirements
 
-- Python 3.8+
-- Windows 10+ (PCAN driver requirement)
+- Python 3.8+ (running from source)
+- Windows 10+ or macOS 11+ — the macOS DMG ships with the PCAN-USB driver, so live capture works on both platforms
 - PEAK PCAN-USB hardware (required for live capture only; playback mode works without hardware)
 - See [CHANGELOG.md](CHANGELOG.md) for detailed release notes
 
 ## Installation
+
+### macOS — pre-built DMG (recommended)
+
+Download `CAN_Bus_Parser_macOS_x86_64.dmg`, open it, and drag **CAN Bus Parser** into **Applications**. The MacCAN PCBUSB user-space driver for PCAN-USB is bundled — live capture works without installing any driver.
+
+The app is ad-hoc signed (not Apple-notarized), so the first launch is intercepted by Gatekeeper: right-click the app → **Open** → **Open** again. If macOS reports the app is "damaged", run in Terminal:
+
+```bash
+sudo xattr -rd com.apple.quarantine "/Applications/CAN Bus Parser.app"
+```
+
+### From source
 
 ```bash
 pip install -r requirements.txt
@@ -39,7 +51,6 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-cd simonyuan_projects/can_parser
 python main.py
 ```
 
@@ -99,9 +110,17 @@ On the Data Table tab, click **Save CSV** to export the current table data.
 
 ## Standalone Builds
 
-Pre-built standalone executables can be generated via PyInstaller.
+### macOS DMG (one-shot script)
 
-### Building from source
+```bash
+bash build_dmg.sh
+```
+
+Runs the full pipeline — icon generation, PyInstaller build (`can_parser.spec`, bundles the PCAN driver dylib plus a runtime hook), ad-hoc codesign, offscreen smoke test, and DMG creation. Output: `dist/CAN_Bus_Parser_macOS_x86_64.dmg`.
+
+### Windows / generic (PyInstaller)
+
+Pre-built standalone executables can also be generated directly via PyInstaller:
 
 ```bash
 pyinstaller --onefile --windowed --icon=can-bus.png --name "CAN_Bus_Parser" main.py
@@ -118,9 +137,11 @@ can_parser/
 ├── dbc_loader.py        # DBC file loader, tree signal model, cascading checkbox logic, mux support
 ├── live_view.py         # Live data view: data table + signal plot tabs, CSV export
 ├── log_view.py          # Log playback control panel
-├── signal_plot.py       # Matplotlib interactive signal time-series plot (blitting + downsampling)
-├── workers.py           # Background polling thread
+├── signal_plot.py       # Matplotlib interactive signal time-series plot (blitting + min-max downsampling)
 ├── requirements.txt     # Python dependencies
+├── build_dmg.sh         # One-shot macOS packaging script (build → sign → smoke test → DMG)
+├── can_parser.spec      # PyInstaller spec (bundles PCAN driver dylib + runtime hook)
+├── hook-dyld-path.py    # Runtime hook: expose bundled dylibs to find_library
 ├── can-bus.png          # Application icon
 ├── cosmo.dbc            # Example DBC (EV, 191 messages)
 ├── num8_combined.asc    # Example ASC log
@@ -133,9 +154,8 @@ can_parser/
 main.py (MainWindow)
   ├── DbcLoader: DBC parsing → QStandardItemModel → QTreeView
   ├── CanBackend: python-can wrapper, capture/playback/decode
-  │     ├── CanWorker: background polling thread (live mode)
-  │     ├── _ParseThread: background full-log decoder → signal index
-  │     └── _ReplayThread: timestamp-driven playback from decoded index
+  │     ├── _ParseThread: background full-log decoder → signal index (payload decode cache)
+  │     └── _ReplayThread: timestamp-driven playback from decoded index (batched emission)
   ├── LiveView: QTabWidget
   │     ├── Data Table (QTableWidget): live signal values, 100ms buffer flush
   │     └── Signal Plot (SignalPlot): Matplotlib interactive chart with blitting
@@ -154,7 +174,7 @@ python-can (Notifier/LogReader)
 CanBackend._decode() → cantools decoding
     │
     ▼
-message_received signal ──→ LiveView buffer ──→ Data Table + Signal Plot
+message_received_batch signal (batched rows) ──→ LiveView buffer ──→ Data Table + Signal Plot
 ```
 
 ## Known Limitations
@@ -165,11 +185,24 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 - Playback speed is fixed at 1x
 - Signal plot displays up to 10,000 data points in visible range (auto-downsamples beyond that)
 - Data table retains up to 1,000 rows (most recent)
-- Windows only for live capture (PCAN driver limitation); playback works cross-platform
+- Live capture works on Windows and macOS (the macOS DMG bundles the PCBUSB driver); Apple Silicon runs the x86_64 build via Rosetta 2
+- The macOS build is ad-hoc signed and not Apple-notarized — first launch requires Gatekeeper confirmation
 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.4 (2026-08-09)
+
+- **Feature:** macOS DMG distribution — standalone `.app` with the MacCAN PCBUSB PCAN-USB driver bundled; live capture works out of the box on macOS
+- **Feature:** One-shot packaging script `build_dmg.sh` (PyInstaller + ad-hoc signing + smoke test + DMG)
+- **Perf:** Blitting actually enabled now (background capture wired into `draw_event`); hover tooltip blitted; zoom/pan coalesced via `draw_idle`
+- **Perf:** Min-max downsampling replaces stride decimation — step signals keep their spikes
+- **Perf:** Live ingestion O(n²) → amortised O(1) (chunked buffers); plot refresh 4 Hz → 10 Hz
+- **Perf:** Live capture and replay deliver rows in batches (~50 ms windows) via `message_received_batch`; parse-time payload decode cache (200k-frame log ≈ 3.7 s)
+- **Perf:** Data-table overflow rebuilt in bulk instead of per-row `removeRow(0)`
+- **Fix:** Packaged app crash right after log parsing (SIGSEGV in Qt raster engine — `QGraphicsDropShadowEffect` vs high-frequency blit repaints); window glow effect removed
+- **Cleanup:** Removed idle `CanWorker` polling thread; added `.gitignore`
 
 ### v0.1.3 (2026-06-27)
 

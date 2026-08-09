@@ -4,13 +4,18 @@ Performance model
 -----------------
 - Each signal keeps its samples as two numpy arrays ``(t, v)`` so bulk loads
   from a pre-parsed log are O(1) assignments instead of per-point appends
-  (see :meth:`set_series`).
-- Rendering uses matplotlib *blitting*: only the changed line artists are
-  redrawn against a cached background each frame. Any interaction that can
-  move axes (zoom/pan/axis-lock/legend-click/resize) invalidates the cache
-  and forces one full draw before blitting resumes.
-- Downsampling is view-aware: when the visible x-range exceeds
-  ``_MAX_DISPLAY`` points we stride within that range, not the whole series.
+  (see :meth:`set_series`). Live samples land in small Python list buffers
+  first and are concatenated into the arrays once per frame, so streaming
+  ingestion is amortised O(1) instead of an O(n^2) ``np.append`` per point.
+- Rendering uses matplotlib *blitting*: lines and the hover overlay are
+  ``animated`` artists. Every full draw (zoom/pan/highlight/resize) ends in
+  a ``draw_event`` that captures a clean background (animated artists are
+  excluded); subsequent frames just restore it and re-rasterise the lines.
+- Autoscale bounds are computed from the data arrays only when the view is
+  reset — never via a per-frame ``relim()`` scan.
+- Downsampling is view-aware min-max decimation: within the visible x-range
+  each block keeps its argmin/argmax sample, so spikes and step edges stay
+  faithful and we never draw more than ``_MAX_DISPLAY`` points per line.
 """
 
 from collections import defaultdict
@@ -66,6 +71,21 @@ class _DarkNavToolbar(_NavToolbarBase):
             QToolButton:pressed { background-color: #30363d; }
         """)
 
+    def save_figure(self, *args):
+        """Un-animate artists around savefig — animated artists are skipped
+        by the normal draw, so the saved image would miss every curve."""
+        animated = [
+            a for ax in self.canvas.figure.axes
+            for a in ax.get_children() if a.get_animated()
+        ]
+        for a in animated:
+            a.set_animated(False)
+        try:
+            super().save_figure(*args)
+        finally:
+            for a in animated:
+                a.set_animated(True)
+
 
 class _ScrollZoomCanvas(FigureCanvasQTAgg):
     """Canvas with mouse-wheel zoom, left-drag pan, and axis-lock via click."""
@@ -114,12 +134,12 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
             self._pan_start = None
             self._axis_lock = hit if self._axis_lock != hit else None
             self._update_axis_highlight()
-            self.draw()
+            self.draw_idle()
             self._notify_interact()
         else:
             self._axis_lock = None
             self._update_axis_highlight()
-            self.draw()
+            self.draw_idle()
             self._notify_interact()
 
     def _update_axis_highlight(self):
@@ -155,7 +175,9 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
         else:
             ax.set_xlim((cx - (cx - xlim[0]) * scale, cx + (xlim[1] - cx) * scale))
             ax.set_ylim((cy - (cy - ylim[0]) * scale, cy + (ylim[1] - cy) * scale))
-        self.draw()
+        # draw_idle (not draw): Qt coalesces bursts of wheel ticks into one
+        # paint, and the resulting draw_event refreshes the blit background.
+        self.draw_idle()
         self._notify_interact()
 
     def mousePressEvent(self, event):
@@ -176,7 +198,8 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
             ylim = ax.get_ylim()
             ax.set_xlim(xlim[0] - (x1 - x0), xlim[1] - (x1 - x0))
             ax.set_ylim(ylim[0] - (y1 - y0), ylim[1] - (y1 - y0))
-            self.draw()
+            # draw_idle so a fast drag coalesces into fewer full paints.
+            self.draw_idle()
             self._notify_interact()
         else:
             super().mouseMoveEvent(event)
@@ -226,7 +249,7 @@ class SignalPlot(QWidget):
         self._ax.grid(True, alpha=0.4, color="#21262d")
 
         self._lines = {}        # key: (can_id, sig_name, instance_id) -> line
-        # key: (can_id, sig_name) -> {"t": np.ndarray, "v": np.ndarray, "dirty": bool}
+        # key: (can_id, sig_name) -> entry dict, see _new_entry()
         self._data = {}
         self._next_inst = {}    # key: (can_id, sig_name) -> next instance id
         self._sig_active = set()  # (can_id, sig_name) pairs with active lines
@@ -237,12 +260,12 @@ class SignalPlot(QWidget):
         self._legend = None
         self._legend_fontsize = 8
 
-        # Blitting state.
+        # Blitting state. The background is (re)captured automatically in
+        # _on_draw after every full paint — nothing has to prime it.
         self._blit_enabled = False
         self._background = None
         # Set whenever the view changes so the next render re-downsamples.
         self._view_changed = True
-        # Force the first frame to capture a fresh background.
         self._invalidate_blit()
 
         # Hover crosshair + tooltip
@@ -265,8 +288,20 @@ class SignalPlot(QWidget):
     # ------------------------------------------------------------------ #
     # Blitting helpers
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _new_entry():
+        """Fresh per-signal data slot.
+
+        ``t``/``v`` hold the committed numpy arrays; ``pt``/``pv`` are small
+        Python list buffers fed by :meth:`add_point` and concatenated into
+        the arrays once per frame (amortised O(1) ingestion).
+        """
+        return {"t": np.empty(0), "v": np.empty(0),
+                "pt": [], "pv": [], "dirty": True}
+
     def _invalidate_blit(self):
-        """Mark the cached background stale; next update_plot re-captures it.
+        """Mark the cached background stale; the next full draw (triggered by
+        the caller via ``draw_idle``) re-captures it in ``_on_draw``.
 
         Also flags a view change so per-line data is re-downsampled against
         the new x-range after a pan/zoom/axis-lock.
@@ -276,11 +311,24 @@ class SignalPlot(QWidget):
         self._view_changed = True
         self._dirty = True
 
-    def _capture_background(self):
-        self._canvas.draw_idle()  # ensure layout/limits are committed
-        self._canvas.draw()       # full paint so bbox is current
-        self._background = self._canvas.copy_from_bbox(self._ax.bbox)
-        self._blit_enabled = True
+    def _blit_animated(self):
+        """Restore the cached background and redraw animated artists only.
+
+        Returns True on success; False when no background is available and
+        the caller should fall back to ``draw_idle``.
+        """
+        if not self._blit_enabled or self._background is None:
+            return False
+        ax = self._ax
+        self._canvas.restore_region(self._background)
+        for line in self._lines.values():
+            ax.draw_artist(line)
+        if self._crosshair.get_visible():
+            ax.draw_artist(self._crosshair)
+        if self._tip.get_visible():
+            ax.draw_artist(self._tip)
+        self._canvas.blit(ax.bbox)
+        return True
 
     def _on_canvas_resize(self):
         """Called after the canvas has been resized by Qt layout."""
@@ -296,7 +344,7 @@ class SignalPlot(QWidget):
         for line in self._lines.values():
             line.remove()
         for key in self._data:
-            self._data[key] = {"t": np.empty(0), "v": np.empty(0), "dirty": True}
+            self._data[key] = self._new_entry()
         self._lines.clear()
         self._next_inst.clear()
         self._sig_active.clear()
@@ -331,7 +379,7 @@ class SignalPlot(QWidget):
         for i, (can_id, sig_name, _sig_obj) in enumerate(checked_signals):
             sig_key = (can_id, sig_name)
             if sig_key not in self._data:
-                self._data[sig_key] = {"t": np.empty(0), "v": np.empty(0), "dirty": True}
+                self._data[sig_key] = self._new_entry()
 
             if sig_key not in self._sig_active:
                 inst = self._next_inst.get(sig_key, 0)
@@ -342,8 +390,10 @@ class SignalPlot(QWidget):
                 label = f"0x{can_id:03X}/{sig_name}"
                 if inst > 0:
                     label += f" [{inst}]"
+                # animated=True: excluded from the cached background and
+                # redrawn via blit every frame (see _blit_animated).
                 line, = self._ax.plot([], [], color=color, label=label, linewidth=1.2,
-                                      picker=True, pickradius=5)
+                                      picker=True, pickradius=5, animated=True)
                 self._lines[line_key] = line
                 self._sig_active.add(sig_key)
                 need_legend = True
@@ -407,7 +457,7 @@ class SignalPlot(QWidget):
         color = self._COLORS[ci % len(self._COLORS)]
         label = f"0x{can_id:03X}/{sig_name} [{inst}]"
         line, = self._ax.plot([], [], color=color, label=label, linewidth=1.2,
-                              picker=True, pickradius=5)
+                              picker=True, pickradius=5, animated=True)
         self._lines[line_key] = line
         self._rebuild_legend()
         self._invalidate_blit()
@@ -455,27 +505,31 @@ class SignalPlot(QWidget):
             t = t - self._base_ts
         entry["t"] = t
         entry["v"] = v
+        entry["pt"].clear()
+        entry["pv"].clear()
         entry["dirty"] = True
         self._dirty = True
         self._view_set = False
 
     def add_point(self, timestamp, can_id, sig_name, value):
-        """Append a single sample (live capture / streaming replay)."""
+        """Append a single sample (live capture / streaming replay).
+
+        Samples land in a Python list buffer; :meth:`update_plot` flushes it
+        into the numpy arrays once per frame — one concatenation per signal
+        per frame instead of a full-array copy per point.
+        """
         if self._base_ts is None:
             self._base_ts = timestamp
         key = (can_id, sig_name)
         entry = self._data.get(key)
         if entry is None:
             return
-        was_empty = entry["t"].size == 0
-        t = timestamp - self._base_ts
-        v = float(value.value) if hasattr(value, 'value') else float(value)
-        entry["t"] = np.append(entry["t"], t)
-        entry["v"] = np.append(entry["v"], v)
+        if entry["t"].size == 0 and not entry["pt"]:
+            self._view_set = False
+        entry["pt"].append(timestamp - self._base_ts)
+        entry["pv"].append(float(value.value) if hasattr(value, 'value') else float(value))
         entry["dirty"] = True
         self._dirty = True
-        if was_empty:
-            self._view_set = False
 
     # ------------------------------------------------------------------ #
     # Rendering
@@ -495,6 +549,16 @@ class SignalPlot(QWidget):
             entry = self._data.get(sig_key)
             if entry is None:
                 continue
+            # Flush pending live samples into the numpy arrays (one concat per
+            # signal per frame — amortised O(1) ingestion).
+            if entry["pt"]:
+                entry["t"] = np.concatenate(
+                    [entry["t"], np.asarray(entry["pt"], dtype=np.float64)])
+                entry["v"] = np.concatenate(
+                    [entry["v"], np.asarray(entry["pv"], dtype=np.float64)])
+                entry["pt"].clear()
+                entry["pv"].clear()
+                entry["dirty"] = True
             t = entry["t"]
             v = entry["v"]
             if t.size == 0:
@@ -508,37 +572,49 @@ class SignalPlot(QWidget):
             xs, ys = self._downsample(t, v)
             line.set_data(xs, ys)
 
-        if any_data:
-            old_xlim = ax.get_xlim()
-            old_ylim = ax.get_ylim()
-            ax.relim()
-            ax.autoscale_view()
-            # Preserve user view once set; only autoscale on first data.
-            if self._view_set:
-                ax.set_xlim(old_xlim)
-                ax.set_ylim(old_ylim)
-            else:
-                self._view_set = True
+        # Autoscale only when the view resets (first data / new series).
+        # Bounds come straight from the arrays — no per-frame relim() scan.
+        if any_data and not self._view_set:
+            self._autoscale_all()
+            self._view_set = True
 
-        # Blit if we can, otherwise a normal idle redraw.
-        if not self._blit_enabled or self._background is None:
+        # Blit if we can, otherwise a normal idle redraw (which ends in
+        # _on_draw and refreshes the blit background for next time).
+        if not self._blit_animated():
             self._canvas.draw_idle()
-            return
 
-        self._canvas.restore_region(self._background)
-        for line in self._lines.values():
-            ax.draw_artist(line)
-        if self._crosshair.get_visible():
-            ax.draw_artist(self._crosshair)
-        if self._tip.get_visible():
-            ax.draw_artist(self._tip)
-        self._canvas.blit(self._ax.bbox)
+    def _autoscale_all(self):
+        """Set the view to cover every loaded series (matplotlib-style 5%
+        margins). Called only on view resets, never per frame."""
+        xmin = ymin = np.inf
+        xmax = ymax = -np.inf
+        for entry in self._data.values():
+            t = entry["t"]
+            if t.size == 0:
+                continue
+            xmin = min(xmin, float(t[0]))
+            xmax = max(xmax, float(t[-1]))
+            v = entry["v"]
+            vmin = float(np.nanmin(v))
+            vmax = float(np.nanmax(v))
+            ymin = min(ymin, vmin)
+            ymax = max(ymax, vmax)
+        if not np.isfinite(xmin):
+            return
+        xpad = (xmax - xmin) * 0.05 or 0.5
+        yspan = ymax - ymin
+        if yspan <= 0:
+            yspan = max(1.0, abs(ymax) * 0.1)
+        ypad = yspan * 0.05
+        self._ax.set_xlim(xmin - xpad, xmax + xpad)
+        self._ax.set_ylim(ymin - ypad, ymax + ypad)
 
     def _downsample(self, t, v):
-        """View-aware decimation: stride within the visible x-range only.
+        """View-aware min-max decimation within the visible x-range.
 
-        Always keeps the first/last sample so axis bounds stay exact, and
-        never draws more than ``_MAX_DISPLAY`` points even for huge logs.
+        Each block keeps its argmin and argmax sample, so spikes and step
+        edges survive decimation (plain stride decimation would drop them).
+        Never returns more than ``_MAX_DISPLAY`` points.
         """
         n = t.size
         if n <= self._MAX_DISPLAY:
@@ -554,19 +630,32 @@ class SignalPlot(QWidget):
         seg = stop - start
         if seg <= self._MAX_DISPLAY:
             return t[start:stop], v[start:stop]
-        stride = seg // self._MAX_DISPLAY
-        idx = np.arange(start, stop, stride)
-        # anchor the very last point so the line reaches the right edge
+        # Vectorised per-block argmin/argmax over the value window.
+        nblocks = self._MAX_DISPLAY // 2
+        block = seg // nblocks
+        usable = block * nblocks
+        vs_win = v[start:start + usable].reshape(nblocks, block)
+        offsets = start + np.arange(nblocks) * block
+        idx = np.unique(np.concatenate([
+            offsets + vs_win.argmin(axis=1),
+            offsets + vs_win.argmax(axis=1),
+        ]))
+        # Anchor the very last point so the line reaches the right edge.
         if idx[-1] != stop - 1:
             idx = np.append(idx, stop - 1)
         return t[idx], v[idx]
 
     def _on_hover(self, event):
-        """Show crosshair + tooltip near the nearest data point on hover."""
+        """Show crosshair + tooltip near the nearest data point on hover.
+
+        The overlay artists are animated, so each move is a cheap blit
+        against the cached background instead of a full redraw.
+        """
         if event.inaxes is None or not self._data:
             self._crosshair.set_visible(False)
             self._tip.set_visible(False)
-            self._canvas.draw_idle()
+            if not self._blit_animated():
+                self._canvas.draw_idle()
             return
 
         mx = event.xdata
@@ -595,7 +684,8 @@ class SignalPlot(QWidget):
         if best_key is None:
             self._crosshair.set_visible(False)
             self._tip.set_visible(False)
-            self._canvas.draw_idle()
+            if not self._blit_animated():
+                self._canvas.draw_idle()
             return
 
         can_id, sig_name = best_key
@@ -614,7 +704,8 @@ class SignalPlot(QWidget):
         self._tip.set_position((tx, ty))
         self._tip.set_visible(True)
 
-        self._canvas.draw_idle()
+        if not self._blit_animated():
+            self._canvas.draw_idle()
 
     def _on_click(self, event):
         # Check the legend first — it may overlap the axes or sit outside it,
@@ -723,10 +814,24 @@ class SignalPlot(QWidget):
         self._invalidate_blit()
 
     def _on_draw(self, event):
-        """Ensure legend stays as overlay (not affecting axes layout)."""
+        """After every full paint: keep the legend as overlay (not affecting
+        axes layout), then capture a clean background for blitting — animated
+        artists (lines, crosshair, tooltip) were excluded from this paint —
+        and redraw them on top so nothing disappears."""
         leg = self._ax.get_legend()
         if leg is not None and leg.get_in_layout():
             leg.set_in_layout(False)
         # keep our reference in sync
         if leg is not None and leg is not self._legend:
             self._legend = leg
+
+        self._background = self._canvas.copy_from_bbox(self._ax.bbox)
+        self._blit_enabled = True
+        ax = self._ax
+        for line in self._lines.values():
+            ax.draw_artist(line)
+        if self._crosshair.get_visible():
+            ax.draw_artist(self._crosshair)
+        if self._tip.get_visible():
+            ax.draw_artist(self._tip)
+        self._canvas.blit(ax.bbox)

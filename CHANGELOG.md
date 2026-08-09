@@ -2,6 +2,67 @@
 
 ---
 
+## v0.1.4 (2026-08-09) — macOS 分发包与性能优化 / macOS Distribution & Performance
+
+### ✨ 新增功能 / New Features
+
+#### 1. macOS 独立分发包（DMG）
+
+- 通过 PyInstaller 打包为 `CAN Bus Parser.app`（onedir 模式）并封装为 DMG，拖入 Applications 即可使用，无需安装 Python 环境
+- **内置 MacCAN PCBUSB 用户态驱动**（`libPCBUSB.dylib` 随应用分发 + runtime hook 自动定位），macOS 上**无需另装驱动即可实时采集** PCAN-USB 数据
+- ad-hoc 代码签名 + offscreen 冒烟测试；DMG 内附《使用须知》（Gatekeeper 首次打开指引）
+- 新增一键打包脚本 `build_dmg.sh`（生成图标 → PyInstaller 构建 → 签名 → 冒烟测试 → DMG）与 `can_parser.spec`
+- `main.py` 新增 `resource_path()`，图标等资源路径兼容 PyInstaller 冻结环境
+
+> 涉及文件：`build_dmg.sh`、`can_parser.spec`、`hook-dyld-path.py`、`README_使用须知.txt`、`main.py`
+
+### 🚀 性能优化 / Performance Optimizations
+
+#### 2. 渲染管线修复与提速（信号图更流畅）
+
+- **接通失效的 blitting**：原 `_capture_background()` 为死代码，blitting 从未生效、每帧全量重绘。现将曲线与悬浮层改为 `animated` 艺术家，`draw_event` 自动捕获背景，后续每帧仅恢复背景 + 光栅化曲线
+- **悬浮提示改 blit**：鼠标滑过不再触发全量重绘
+- **缩放/平移合帧**：滚轮与拖拽由同步 `draw()` 改为 `draw_idle()`，Qt 事件循环自然合并连续事件
+- **min-max 降采样**：替代等距抽稀，按块保留 argmin/argmax，阶跃信号不再丢尖峰
+- 基准：3 信号 × 10 万点批量首帧 2.5ms，流式 100 帧 2.66ms/帧；实时刷新率 4Hz → 10Hz
+
+> 涉及文件：`signal_plot.py`、`live_view.py`
+
+#### 3. 解析与数据链路提速
+
+- **实时采集 O(n²) → 摊还 O(1)**：`add_point()` 由逐点 `np.append` 改为分块缓冲，每帧每信号一次 `concatenate`
+- **跨线程批量化**：实时（64 帧 / 50ms 一批）与回放（50ms 时间窗、单批上限 5000 行）统一经新信号 `message_received_batch` 传输，高负载下跨线程信号量降低约两个数量级
+- **解码缓存**：`_ParseThread` 以 `(frame_id, payload)` 为键缓存解码结果（上限 20 万条），重复帧跳过 cantools 纯 Python 解码；20 万帧合成日志解析约 3.7s
+- **回放零拷贝**：去除 `_begin_replay()` 中对全部解析行的 `list()` 复制
+- **表格批量重建**：数据表超限由循环 `removeRow(0)`（O(n²)）改为整体重建 + 批量裁剪
+- 去除每帧 `relim() + autoscale_view()` 全量扫描，改为视图重置时按数组边界一次性计算
+
+> 涉及文件：`can_backend.py`、`live_view.py`、`signal_plot.py`、`main.py`
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 4. 打包程序解析 CAN 日志后闪退（严重）
+
+**问题：** macOS 打包版在日志解析完成、信号图开始渲染时立即崩溃（EXC_BAD_ACCESS / SIGSEGV），源码运行不易复现。
+
+**原因：** 主窗口挂载的 `QGraphicsDropShadowEffect` 阴影特效与本版本接通的高频 blit 同步重绘叠加，命中 Qt 光栅引擎缺陷（崩溃堆栈：`QRasterPaintEngine::transformChanged` ← `QGraphicsDropShadowEffect::draw` ← matplotlib `blit()` 触发的同步 `repaint()`）。优化前低频异步重绘不触发，故问题在 blitting 接通后才暴露。
+
+**修复：** 移除窗口阴影特效（仅损失边框淡蓝光晕），并在代码中留注释防止回退。依据：`~/Library/Logs/DiagnosticReports` 崩溃报告堆栈。
+
+> 涉及文件：`main.py`
+
+### 🧹 清理 / Cleanup
+
+- 移除空转的 `CanWorker` 轮询线程（`workers.py` 删除；实时采集由 `can.Notifier` 自身线程驱动）
+- 新增 `.gitignore`（build/、dist/、__pycache__ 等打包产物）
+
+### 📋 已知限制更新 / Known Limitations Update
+
+- 实时采集不再限于 Windows：macOS 经内置 PCBUSB 驱动同样支持（Apple Silicon 通过 Rosetta 2 运行 x86_64 包）
+- 打包版未经 Apple 公证，首次打开需右键确认或解除隔离属性（DMG 内说明已指引）
+
+---
+
 ## v0.1.3 (2026-06-27) — Bug 修复与增强 / Bug Fixes & Enhancements
 
 ### 🐛 Bug 修复 / Bug Fixes

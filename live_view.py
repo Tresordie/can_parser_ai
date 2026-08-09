@@ -21,6 +21,9 @@ class LiveView(QWidget):
     # Emitted with a status message (e.g. during CSV export) for the status bar.
     status_message = pyqtSignal(str)
     MAX_TABLE_ROWS = 1000
+    # The table is rebuilt in one shot (instead of per-row removes) once it
+    # overflows past this margin; this amortises the trim cost.
+    _TRIM_MARGIN = 200
     FLUSH_INTERVAL_MS = 100
 
     def __init__(self, backend, dbc_loader, parent=None):
@@ -74,7 +77,7 @@ class LiveView(QWidget):
 
         layout.addLayout(btn_layout)
 
-        backend.message_received.connect(self._on_message)
+        backend.message_received_batch.connect(self._on_message_batch)
 
         self._msg_buffer = []
         self._flush_timer = QTimer(self)
@@ -83,9 +86,9 @@ class LiveView(QWidget):
 
         self._plot_timer = QTimer(self)
         self._plot_timer.timeout.connect(self._plot.update_plot)
-        # Blitting keeps each frame cheap enough for ~4 Hz refresh, which
+        # Blitting keeps each frame cheap enough for a 10 Hz refresh, which
         # makes live capture and log replay feel responsive.
-        self._plot_timer.start(250)
+        self._plot_timer.start(100)
 
     def load_parsed_series(self, checked_signals=None):
         """Bulk-load parsed data once a log finishes decoding.
@@ -273,13 +276,17 @@ class LiveView(QWidget):
         table.setUpdatesEnabled(True)
         table.scrollToBottom()
 
-    def _on_message(self, msg, decoded):
-        if not self._checked_signals or decoded is None:
+    def _on_message_batch(self, batch):
+        """Receive a batch of (ts, decoded) rows from the backend.
+
+        Batching (instead of one signal per frame) keeps cross-thread
+        traffic far lower at high bus loads. Rows carry decoded dicts
+        only; an empty dict still arrives so mux-mismatched frames keep
+        their timestamp row in the table.
+        """
+        if not self._checked_signals:
             return
-        # decoded may be {} for multiplexed messages where the frame's mux
-        # value doesn't match any checked signal — still queue it so the
-        # timestamp row is preserved in the data table.
-        self._msg_buffer.append((msg, decoded))
+        self._msg_buffer.extend(batch)
 
     def _flush_buffer(self):
         if not self._msg_buffer:
@@ -294,34 +301,36 @@ class LiveView(QWidget):
         plot = self._plot
         max_rows = self.MAX_TABLE_ROWS
 
+        # Plot points + row storage first (needed in both table paths).
+        checked = self._checked_signals
+        for ts, decoded in batch:
+            for can_id, sig_name, _sig in checked:
+                val = decoded.get(sig_name)
+                if val is not None:
+                    plot.add_point(ts, can_id, sig_name, val)
+            # Keep every row (even empty decodes) so timestamps stay
+            # continuous for multiplexed messages.
+            data_rows.append({"ts": ts, "decoded": decoded})
+
+        # Cap the backing row list; one bulk del per overflow.
+        if len(data_rows) > max_rows + self._TRIM_MARGIN:
+            del data_rows[:len(data_rows) - max_rows]
+
+        # If the batch overflows the window past the trim margin,
+        # rebuild the table in one shot; else incremental append.
+        if table.rowCount() + len(batch) > max_rows + self._TRIM_MARGIN:
+            self._rebuild_table()
+            return
+
         table.setUpdatesEnabled(False)
-        for msg, decoded in batch:
-            ts = msg.timestamp
+        for ts, decoded in batch:
             row_idx = table.rowCount()
             table.insertRow(row_idx)
             table.setItem(row_idx, 0, QTableWidgetItem(f"{ts:.6f}"))
-
-            # Table columns cover every decoded signal; the plot only gets
-            # points for the checked signals.
             for col, (can_id, sig_name, _sig) in enumerate(table_signals, 1):
                 val = decoded.get(sig_name)
                 if val is not None:
                     table.setItem(row_idx, col, QTableWidgetItem(str(val)))
-
-            for can_id, sig_name, _sig in self._checked_signals:
-                val = decoded.get(sig_name)
-                if val is not None:
-                    plot.add_point(ts, can_id, sig_name, val)
-
-            # Always keep the row (even when has_value is False) so the
-            # timestamp sequence stays continuous for multiplexed messages
-            # where some frames don't match the checked mux group.
-            data_rows.append({"ts": ts, "decoded": decoded})
-
-        while table.rowCount() > max_rows:
-            table.removeRow(0)
-            data_rows.pop(0)
-
         table.setUpdatesEnabled(True)
         if batch:
             table.scrollToBottom()

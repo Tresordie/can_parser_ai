@@ -29,7 +29,12 @@ from can_backend import CanBackend
 from dbc_loader import DbcLoader
 from live_view import LiveView
 from log_view import LogView
-from workers import CanWorker
+
+
+def resource_path(relative):
+    """Resolve bundled resource path (works both in source and PyInstaller builds)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
 
 STYLESHEET = """
 /* ── Global ── */
@@ -378,14 +383,10 @@ class MainWindow(QMainWindow):
 
         self._dbc_loader = DbcLoader()
         self._backend = CanBackend()
-        self._worker = None
         self._live_view = LiveView(self._backend, self._dbc_loader)
         self._log_view = LogView()
 
-        self._icon_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "can-bus.png",
-        )
+        self._icon_path = resource_path("can-bus.png")
         self._msg_count = 0
         self._init_ui()
         self._connect_all()
@@ -524,7 +525,7 @@ class MainWindow(QMainWindow):
         self._dbc_loader.dbc_loaded.connect(self._on_dbc_loaded)
         self._dbc_loader.error_occurred.connect(self._show_error)
 
-        self._backend.message_received.connect(self._on_message)
+        self._backend.message_received_batch.connect(self._on_message_batch)
         self._backend.error_occurred.connect(
             lambda m: self._status_label.setText(f"Error: {m}")
         )
@@ -700,8 +701,6 @@ class MainWindow(QMainWindow):
         channel = self._channel_combo.currentText()
         bitrate = int(self._bitrate_combo.currentText())
         self._backend.start_live(channel=channel, bitrate=bitrate)
-        self._worker = CanWorker(self._backend)
-        self._worker.start()
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._status_label.setText(
@@ -716,10 +715,6 @@ class MainWindow(QMainWindow):
             self._stop_playback()
         elif mode == 'live':
             self._backend.stop()
-            if self._worker:
-                self._worker.stop()
-                self._worker.wait(2000)
-                self._worker = None
             self._live_view.flush_buffer()
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
@@ -728,10 +723,6 @@ class MainWindow(QMainWindow):
     def _stop_playback(self):
         """LogView Stop — stops local log parsing/replay only."""
         self._backend.stop()
-        if self._worker:
-            self._worker.stop()
-            self._worker.wait(2000)
-            self._worker = None
         self._live_view.flush_buffer()
         self._log_view.set_playing(False)
         self._status_label.setText("Playback stopped")
@@ -750,8 +741,8 @@ class MainWindow(QMainWindow):
         self._msg_count = 0
         self._msg_label.setText("Messages: 0")
 
-    def _on_message(self, msg, decoded):
-        self._msg_count += 1
+    def _on_message_batch(self, batch):
+        self._msg_count += len(batch)
         self._msg_label.setText(f"Messages: {self._msg_count}")
 
     def _on_parse_progress(self, done, total):
@@ -813,13 +804,6 @@ class MainWindow(QMainWindow):
             self._backend.stop()
         except Exception:
             pass
-        if self._worker:
-            try:
-                self._worker.stop()
-                self._worker.wait(2000)
-            except Exception:
-                pass
-            self._worker = None
         super().closeEvent(event)
 
 
@@ -855,23 +839,16 @@ def main():
     app.setFont(font)
 
     app.setStyleSheet(STYLESHEET + TITLE_BAR_STYLE)
-    icon_dir = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(icon_dir, "can-bus.png")
+    icon_path = resource_path("can-bus.png")
     app_icon = QIcon(icon_path)
     app.setWindowIcon(app_icon)
     window = MainWindow()
     window.setWindowIcon(app_icon)
 
-    # Subtle glow shadow for the frameless window
-    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
-
-    shadow = QGraphicsDropShadowEffect(window)
-    shadow.setBlurRadius(40)
-    shadow_color = QColor("#1f6feb")
-    shadow_color.setAlpha(38)  # ~15% opacity (38/255)
-    shadow.setColor(shadow_color)
-    shadow.setOffset(0, 0)
-    window.setGraphicsEffect(shadow)
+    # NOTE: a QGraphicsDropShadowEffect used to decorate the frameless window,
+    # but the raster-engine shadow pass crashes (SIGSEGV in
+    # QRasterPaintEngine::transformChanged) under the high-frequency
+    # synchronous repaints issued by the plot blit path — removed for stability.
 
     window.show()
     sys.exit(app.exec_())

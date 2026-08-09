@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# PyInstaller packaging artifacts
+build/
+dist/
+can_parser.icns
+build_icon.iconset/
+
+# macOS
+.DS_Store

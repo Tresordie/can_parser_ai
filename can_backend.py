@@ -200,6 +200,10 @@ def _parse_signal_csv(filepath):
 
 class CanBackend(QObject):
     message_received = pyqtSignal(object, object)
+    # Batch form of message_received: list of (timestamp, decoded_dict)
+    # rows. Live capture and log replay both emit through it, so the UI
+    # pays one cross-thread hop per ~50 ms batch instead of one per frame.
+    message_received_batch = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
     stopped = pyqtSignal()
     # (done, total) parse progress for status-bar feedback
@@ -230,6 +234,10 @@ class CanBackend(QObject):
         self._mode = None
         # Raw can.Message list captured during live mode (for CAN Log export).
         self._raw_messages = []
+        # Live-mode batch accumulator: frames are decoded in the Notifier
+        # thread and emitted as one queued signal every ~64 frames / 50 ms.
+        self._live_batch = []
+        self._live_last_flush = time.monotonic()
 
     def set_dbc(self, dbc):
         self._dbc = dbc
@@ -398,7 +406,7 @@ class CanBackend(QObject):
                 channel=channel,
                 bitrate=bitrate,
             )
-            self._notifier = can.Notifier(self._bus, [self._on_message])
+            self._notifier = can.Notifier(self._bus, [self._on_live_message])
             self._running = True
             self._mode = 'live'
             # Fresh capture buffer for this live session.
@@ -462,7 +470,7 @@ class CanBackend(QObject):
             except Exception:
                 pass
             try:
-                t.message_with_data.disconnect(self._on_message_with_data)
+                t.message_batch.disconnect(self._on_replay_batch)
             except Exception:
                 pass
             t.stop()
@@ -502,10 +510,11 @@ class CanBackend(QObject):
             self._running = False
             self.stopped.emit()
             return
+        # Pass rows by reference — the replay thread only reads them.
         self._playback_thread = _ReplayThread(
-            list(self._parsed_rows), speed, parent=self
+            self._parsed_rows, speed, parent=self
         )
-        self._playback_thread.message_with_data.connect(self._on_message_with_data)
+        self._playback_thread.message_batch.connect(self._on_replay_batch)
         self._playback_thread.finished.connect(self._on_playback_done)
         self._playback_thread.start()
 
@@ -521,21 +530,40 @@ class CanBackend(QObject):
         self._running = False
         self.stopped.emit()
 
-    def _on_message(self, msg):
+    def _on_live_message(self, msg):
+        """Notifier-thread listener: buffer raw frames and emit decoded
+        rows in batches (one queued signal per ~64 frames / 50 ms)."""
         if not self._running:
             return
-        # In live mode keep every raw frame so it can be exported as a
-        # standard CAN Log (ASC) later. Playback mode already keeps the
-        # pre-decoded rows, so it does not need this.
-        if self._mode == 'live':
+        # Keep every raw frame so it can be exported as a CAN Log (ASC).
+        if self._mode == "live":
             self._raw_messages.append(msg)
-        decoded = self._decode(msg)
-        self.message_received.emit(msg, decoded)
+        self._live_batch.append(msg)
+        if (len(self._live_batch) >= 64
+                or time.monotonic() - self._live_last_flush >= 0.05):
+            self._flush_live_batch()
 
-    def _on_message_with_data(self, msg, decoded):
+    def _flush_live_batch(self):
+        batch = self._live_batch
+        if not batch:
+            return
+        self._live_batch = []
+        self._live_last_flush = time.monotonic()
+        rows = []
+        for msg in batch:
+            decoded = self._decode(msg)
+            # None -> frame ID not checked; skip. An empty dict (mux
+            # mismatch) is kept so the table preserves the timestamp.
+            if decoded is not None:
+                rows.append((msg.timestamp, decoded))
+        if rows:
+            self.message_received_batch.emit(rows)
+
+    def _on_replay_batch(self, batch):
+        """Forward a replay batch (list of (ts, decoded) rows) to the UI."""
         if not self._running:
             return
-        self.message_received.emit(msg, decoded)
+        self.message_received_batch.emit(batch)
 
     def _decode(self, msg):
         """Decode the *checked* signals of a live message.
@@ -578,6 +606,8 @@ class CanBackend(QObject):
         if self._notifier:
             self._notifier.stop()
             self._notifier = None
+        # Flush any decoded frames still sitting in the live batch.
+        self._flush_live_batch()
         if self._bus:
             self._bus.shutdown()
             self._bus = None
@@ -650,24 +680,33 @@ class _ParseThread(QThread):
 
         # Single pass: decode each matching frame and scatter into the index.
         frame_id_map = self._frame_id_map
-        dbc = self._dbc
         series = self._series
         rows = self._rows
         total = len(messages)
         step = max(1, total // 100)
+        # (frame_id, payload) -> decoded dict; recorded logs repeat
+        # identical frames often, so a cache hit skips the pure-Python
+        # cantools decode. Cached dicts are only ever read downstream.
+        decode_cache = {}
+        cache_max = 200000
 
         for i, msg in enumerate(messages):
             if self._stop:
                 return
             ts = msg.timestamp
             msg_def = frame_id_map.get(msg.arbitration_id)
+            decoded = None
             if msg_def is not None and len(msg.data) > 0:
-                try:
-                    decoded = msg_def.decode(msg.data, decode_choices=False, allow_truncated=True)
-                except Exception:
-                    decoded = None
-            else:
-                decoded = None
+                data_b = bytes(msg.data)
+                decoded = decode_cache.get((msg.arbitration_id, data_b))
+                if decoded is None:
+                    try:
+                        decoded = msg_def.decode(data_b, decode_choices=False,
+                                                 allow_truncated=True)
+                    except Exception:
+                        decoded = None
+                    if decoded and len(decode_cache) < cache_max:
+                        decode_cache[(msg.arbitration_id, data_b)] = decoded
             if decoded:
                 for sig_name, v in decoded.items():
                     lst = series.get(sig_name)
@@ -717,9 +756,17 @@ class _ParseThread(QThread):
 
 
 class _ReplayThread(QThread):
-    """Timestamp-driven replay that consumes already-decoded rows."""
+    """Timestamp-driven replay that consumes already-decoded rows.
 
-    message_with_data = pyqtSignal(object, object)
+    Rows due within each ~50 ms wall-clock window are emitted as one
+    batch, so a dense log (or a high speed factor) costs one cross-thread
+    hop per window instead of one per frame.
+    """
+
+    message_batch = pyqtSignal(list)
+
+    _WINDOW_S = 0.05     # collection window per batch (wall clock)
+    _MAX_BATCH = 5000    # hard cap on rows per emitted batch
 
     def __init__(self, rows, speed=1.0, parent=None):
         super().__init__(parent)
@@ -731,25 +778,36 @@ class _ReplayThread(QThread):
         self._stop = True
 
     def run(self):
-        if not self._rows:
+        rows = self._rows
+        if not rows:
             return
-        base_ts = self._rows[0][0]
+        base_ts = rows[0][0]
         base_wall = time.time()
-        for row in self._rows:
-            if self._stop:
+        n = len(rows)
+        speed = self._speed
+        i = 0
+        while i < n and not self._stop:
+            now = time.time()
+            batch = []
+            # Collect every row that comes due within the next window.
+            while i < n and len(batch) < self._MAX_BATCH:
+                target = base_wall + (rows[i][0] - base_ts) / speed
+                if target - now > self._WINDOW_S:
+                    break
+                batch.append((rows[i][0], rows[i][1]))
+                i += 1
+            if batch:
+                self.message_batch.emit(batch)
+            if i >= n or self._stop:
                 return
-            ts, decoded = row[0], row[1]
-            offset = ts - base_ts
-            target = base_wall + offset / self._speed
+            # Sleep until the next row is due, in 100 ms chunks so stop()
+            # stays responsive across large timestamp gaps.
+            target = base_wall + (rows[i][0] - base_ts) / speed
             delay = target - time.time()
             if delay > 0.001:
-                # Sleep in 100 ms chunks so we can respond to stop() quickly
-                # even across large timestamp gaps in the log.
                 remaining_ms = int(delay * 1000)
                 while remaining_ms > 0 and not self._stop:
                     chunk = min(remaining_ms, 100)
                     self.msleep(chunk)
+                    self.msleep(chunk)
                     remaining_ms -= chunk
-                if self._stop:
-                    return
-            self.message_with_data.emit(_FakeMsg(ts), decoded)

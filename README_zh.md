@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.3
+# CAN Bus Parser v0.1.4
 
 基于 PyQt5 + python-can + cantools 的 CAN 总线数据采集与离线分析桌面工具。
 
@@ -16,12 +16,24 @@
 
 ## 环境要求
 
-- Python 3.8+
-- Windows 10+（PCAN 驱动依赖）
-- PEAK PCAN-USB 硬件（实时采集时需要，回放模式无需硬件）
+- Python 3.8+（源码运行）
+- Windows 10+ 或 macOS 11+ —— macOS DMG 已内置 PCAN-USB 驱动，两种平台均支持实时采集
+- PEAK PCAN-USB 硬件（仅实时采集需要，回放模式无需硬件）
 - 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录
 
 ## 安装
+
+### macOS —— 预构建 DMG（推荐）
+
+下载 `CAN_Bus_Parser_macOS_x86_64.dmg`，打开后将 **CAN Bus Parser** 拖入 **Applications**。应用已内置 MacCAN PCBUSB 用户态驱动——无需另装驱动即可实时采集 PCAN-USB 数据。
+
+应用为 ad-hoc 签名（未经 Apple 公证），首次打开会被 Gatekeeper 拦截：右键应用 → **打开** → 再次点击 **打开**。若提示“已损坏”，在终端执行：
+
+```bash
+sudo xattr -rd com.apple.quarantine "/Applications/CAN Bus Parser.app"
+```
+
+### 源码运行
 
 ```bash
 pip install -r requirements.txt
@@ -39,7 +51,6 @@ pip install -r requirements.txt
 ## 使用方式
 
 ```bash
-cd simonyuan_projects/can_parser
 python main.py
 ```
 
@@ -99,9 +110,17 @@ Messages / Signals
 
 ## 独立运行包
 
-可通过 PyInstaller 生成独立可执行文件，无需安装 Python 环境。
+### macOS DMG（一键脚本）
 
-### 从源码构建
+```bash
+bash build_dmg.sh
+```
+
+完整流水线：图标生成 → PyInstaller 构建（`can_parser.spec`，内置 PCAN 驱动 dylib 与 runtime hook）→ ad-hoc 签名 → offscreen 冒烟测试 → DMG 打包。产物：`dist/CAN_Bus_Parser_macOS_x86_64.dmg`。
+
+### Windows / 通用（PyInstaller）
+
+也可直接用 PyInstaller 生成独立可执行文件：
 
 ```bash
 pyinstaller --onefile --windowed --icon=can-bus.png --name "CAN_Bus_Parser" main.py
@@ -118,9 +137,11 @@ can_parser/
 ├── dbc_loader.py        # DBC 文件加载，树形信号模型，级联选择逻辑，多路复用支持
 ├── live_view.py         # 实时数据视图：数据表 + 信号图标签页，CSV 导出
 ├── log_view.py          # 日志回放控制面板
-├── signal_plot.py       # Matplotlib 交互式信号时序图（blitting + 降采样）
-├── workers.py           # 后台轮询线程
+├── signal_plot.py       # Matplotlib 交互式信号时序图（blitting + min-max 降采样）
 ├── requirements.txt     # Python 依赖
+├── build_dmg.sh         # macOS 一键打包脚本（构建 → 签名 → 冒烟测试 → DMG）
+├── can_parser.spec      # PyInstaller 配置（内置 PCAN 驱动 dylib + runtime hook）
+├── hook-dyld-path.py    # Runtime hook：让 find_library 发现内置 dylib
 ├── can-bus.png          # 应用图标
 ├── cosmo.dbc            # 示例 DBC（电动车，191 条报文）
 ├── num8_combined.asc    # 示例 ASC 日志
@@ -133,9 +154,8 @@ can_parser/
 main.py (MainWindow)
   ├── DbcLoader: DBC 解析 → QStandardItemModel → QTreeView
   ├── CanBackend: python-can 封装，采集/回放/解码
-  │     ├── CanWorker: 后台轮询线程（实时模式）
-  │     ├── _ParseThread: 后台全量日志解码 → 信号索引
-  │     └── _ReplayThread: 基于时间戳的回放，从索引消费数据
+  │     ├── _ParseThread: 后台全量日志解码 → 信号索引（payload 解码缓存）
+  │     └── _ReplayThread: 基于时间戳的回放，从索引消费数据（批量发射）
   ├── LiveView: QTabWidget
   │     ├── 数据表 (QTableWidget): 实时信号值，100ms 缓冲刷新
   │     └── 信号图 (SignalPlot): Matplotlib 交互式图表（blitting 渲染）
@@ -154,7 +174,7 @@ python-can (Notifier/LogReader)
 CanBackend._decode() → cantools 解码
     │
     ▼
-message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号图
+message_received_batch 信号（批量行）──→ LiveView 缓冲 ──→ 数据表 + 信号图
 ```
 
 ## 已知限制
@@ -165,11 +185,24 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 - 回放速度固定为 1x，不支持倍速播放
 - 信号图可视范围最多同时显示 10,000 个数据点（超出自动降采样）
 - 数据表最多保留 1,000 行（最近数据）
-- 实时采集仅支持 Windows（PCAN 驱动限制）；回放模式跨平台可用
+- 实时采集支持 Windows 与 macOS（macOS DMG 已内置 PCBUSB 驱动）；Apple Silicon 通过 Rosetta 2 运行 x86_64 包
+- macOS 包为 ad-hoc 签名、未经 Apple 公证，首次打开需 Gatekeeper 确认
 
 ## 版本历史
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
+
+### v0.1.4 (2026-08-09)
+
+- **新增：** macOS DMG 分发包——内置 MacCAN PCBUSB 驱动的独立 `.app`，macOS 开箱即用实时采集
+- **新增：** 一键打包脚本 `build_dmg.sh`（PyInstaller 构建 + ad-hoc 签名 + 冒烟测试 + DMG）
+- **性能：** 真正接通 blitting（背景捕获接入 `draw_event`）；悬浮提示改 blit；缩放/平移 `draw_idle` 合帧
+- **性能：** min-max 降采样替代等距抽稀——阶跃信号不再丢尖峰
+- **性能：** 实时摄入 O(n²) → 摊还 O(1)（分块缓冲）；绘图刷新 4 Hz → 10 Hz
+- **性能：** 实时采集与回放按 ~50ms 批量经 `message_received_batch` 传输；解析增加 payload 解码缓存（20 万帧日志 ≈ 3.7s）
+- **性能：** 数据表超限改批量重建，消除逐行 `removeRow(0)` 的 O(n²)
+- **修复：** 打包程序解析日志后闪退（Qt 光栅引擎 SIGSEGV——窗口阴影特效与高频 blit 重绘叠加），移除光晕特效
+- **清理：** 移除空转的 `CanWorker` 轮询线程；新增 `.gitignore`
 
 ### v0.1.3 (2026-06-27)
 
