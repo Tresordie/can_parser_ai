@@ -29,12 +29,14 @@ class LogView(QWidget):
         layout.addWidget(self._path_edit, 1)
 
         self._play_btn = QPushButton("Parse")
+        self._play_btn.setObjectName("parseBtn")
         self._play_btn.setFixedHeight(28)
         self._play_btn.setEnabled(False)
         self._play_btn.clicked.connect(self.play_requested.emit)
         layout.addWidget(self._play_btn)
 
         self._stop_btn = QPushButton("Stop")
+        self._stop_btn.setObjectName("stopBtn")
         self._stop_btn.setFixedHeight(28)
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self.stop_requested.emit)

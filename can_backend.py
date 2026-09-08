@@ -29,6 +29,16 @@ def _plain_value(v):
     return v
 
 
+def _ensure_sorted_rows(rows):
+    """Stable-sort parsed rows by timestamp when out of order.
+
+    Segmented or merged logs can carry disordered timestamps; the O(n)
+    pre-check makes this a no-op for well-ordered files.
+    """
+    if any(rows[i][0] > rows[i + 1][0] for i in range(len(rows) - 1)):
+        rows.sort(key=lambda r: r[0])
+
+
 def _build_frame_id_map(dbc):
     """Pre-build {frame_id: message} for O(1) lookup during decode."""
     if dbc is None:
@@ -393,18 +403,24 @@ class CanBackend(QObject):
     # ------------------------------------------------------------------ #
     def start_live(self, channel="PCAN_USBBUS1", bitrate=500000):
         try:
+            # Reset the capture buffer and raise the running flag BEFORE the
+            # Notifier exists — frames delivered from the first instant must
+            # land in a fresh, accepting buffer (previously the reset ran
+            # after Notifier construction and startup frames were lost).
+            self._raw_messages = []
+            self._running = True
+            self._mode = 'live'
             self._bus = can.Bus(
                 interface="pcan",
                 channel=channel,
                 bitrate=bitrate,
             )
             self._notifier = can.Notifier(self._bus, [self._on_message])
-            self._running = True
-            self._mode = 'live'
-            # Fresh capture buffer for this live session.
-            self._raw_messages = []
+            return True
         except Exception as e:
+            self._running = False
             self.error_occurred.emit(f"Cannot open CAN device: {e}")
+            return False
 
     # ------------------------------------------------------------------ #
     # Log playback: parse-first, then replay
@@ -462,7 +478,7 @@ class CanBackend(QObject):
             except Exception:
                 pass
             try:
-                t.message_with_data.disconnect(self._on_message_with_data)
+                t.message_with_data.disconnect(self._on_messages_with_data)
             except Exception:
                 pass
             t.stop()
@@ -505,7 +521,7 @@ class CanBackend(QObject):
         self._playback_thread = _ReplayThread(
             list(self._parsed_rows), speed, parent=self
         )
-        self._playback_thread.message_with_data.connect(self._on_message_with_data)
+        self._playback_thread.messages_with_data.connect(self._on_messages_with_data)
         self._playback_thread.finished.connect(self._on_playback_done)
         self._playback_thread.start()
 
@@ -532,10 +548,17 @@ class CanBackend(QObject):
         decoded = self._decode(msg)
         self.message_received.emit(msg, decoded)
 
-    def _on_message_with_data(self, msg, decoded):
+    def _on_messages_with_data(self, batch):
+        """Re-emit a replayed batch frame by frame on the GUI thread.
+
+        In playback mode LiveView and MainWindow both ignore these rows (the
+        parsed index already holds everything) — the replay thread only
+        drives the session state machine.
+        """
         if not self._running:
             return
-        self.message_received.emit(msg, decoded)
+        for ts, decoded in batch:
+            self.message_received.emit(_FakeMsg(ts), decoded)
 
     def _decode(self, msg):
         """Decode the *checked* signals of a live message.
@@ -571,6 +594,7 @@ class CanBackend(QObject):
         return decoded
 
     def stop(self):
+        was_running = self._running
         self._running = False
         # Join parse/replay threads (with a generous timeout) before dropping
         # references — never orphan a running QThread.
@@ -581,7 +605,11 @@ class CanBackend(QObject):
         if self._bus:
             self._bus.shutdown()
             self._bus = None
-        self.stopped.emit()
+        # Only notify the UI when something was actually running — some
+        # paths reach stop() twice, and a duplicate emission double-flushed
+        # the table.
+        if was_running:
+            self.stopped.emit()
 
 
 class _ParseThread(QThread):
@@ -604,6 +632,9 @@ class _ParseThread(QThread):
         # Index built during run():
         #   {sig_name: [list_of_t, list_of_v]}
         self._series = {}
+        # Already-converted numpy chunks per signal (see _stash_series_chunks)
+        # the boxed-float lists never hold a whole signal in memory.
+        self._chunks = {}
         self._rows = []
 
     def stop(self):
@@ -626,6 +657,7 @@ class _ParseThread(QThread):
             if self._stop:
                 return
             self._build_index_from_rows(signal_rows)
+            self._finalize_series()
             self._emit_progress(len(signal_rows), len(signal_rows))
             self.parsed_ready.emit()
             return
@@ -638,49 +670,71 @@ class _ParseThread(QThread):
 
         if messages is None:
             try:
-                reader = can.LogReader(self._filepath)
-                messages = list(reader)
+                source = can.LogReader(self._filepath)
             except Exception as e:
                 self.error_occurred.emit(f"Failed to read log file: {e}")
                 return
-
-        if not messages:
-            self.error_occurred.emit("Log file contains no messages")
-            return
+            # Stream-decode instead of materializing every can.Message first —
+            # the raw list alone costs ~200 MB on a 750k-frame log. The total
+            # is unknown until the file ends; progress reports frame counts.
+            total = 0
+        else:
+            source = messages
+            total = len(messages)
 
         # Single pass: decode each matching frame and scatter into the index.
         frame_id_map = self._frame_id_map
         dbc = self._dbc
         series = self._series
         rows = self._rows
-        total = len(messages)
-        step = max(1, total // 100)
+        step = max(1, total // 100) if total else 2000
+        count = 0
 
-        for i, msg in enumerate(messages):
-            if self._stop:
-                return
-            ts = msg.timestamp
-            msg_def = frame_id_map.get(msg.arbitration_id)
-            if msg_def is not None and len(msg.data) > 0:
-                try:
-                    decoded = msg_def.decode(msg.data, decode_choices=False, allow_truncated=True)
-                except Exception:
+        # The try covers the iteration itself: streamed readers raise on
+        # first pull for corrupt files, and an unhandled exception inside a
+        # QThread.run() aborts the whole process.
+        try:
+            for msg in source:
+                if self._stop:
+                    return
+                ts = msg.timestamp
+                msg_def = frame_id_map.get(msg.arbitration_id)
+                if msg_def is not None and len(msg.data) > 0:
+                    try:
+                        decoded = msg_def.decode(msg.data, decode_choices=False, allow_truncated=True)
+                    except Exception:
+                        decoded = None
+                else:
                     decoded = None
-            else:
-                decoded = None
-            if decoded:
-                for sig_name, v in decoded.items():
-                    lst = series.get(sig_name)
-                    if lst is None:
-                        lst = [[], []]
-                        series[sig_name] = lst
-                    lst[0].append(ts)
-                    lst[1].append(_plain_value(v))
-                rows.append((ts, decoded, (msg.arbitration_id, msg.dlc, bytes(msg.data))))
-            if i % step == 0:
-                self._emit_progress(i, total)
+                if decoded:
+                    for sig_name, v in decoded.items():
+                        lst = series.get(sig_name)
+                        if lst is None:
+                            lst = [[], []]
+                            series[sig_name] = lst
+                        lst[0].append(ts)
+                        lst[1].append(_plain_value(v))
+                    rows.append((ts, decoded, (msg.arbitration_id, msg.dlc, bytes(msg.data))))
+                count += 1
+                if count % step == 0:
+                    # Mid-parse: stash buffered lists as numpy chunks — never
+                    # finalize here, the loop keeps appending afterwards.
+                    self._stash_series_chunks()
+                    self._emit_progress(count, total)
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to read log file: {e}")
+            return
 
-        self._emit_progress(total, total)
+        if count == 0:
+            self.error_occurred.emit("Log file contains no messages")
+            return
+
+        # Logs assembled from segments (or merged files) can carry
+        # out-of-order timestamps; keep replay pacing and table order sane.
+        _ensure_sorted_rows(rows)
+
+        self._finalize_series()
+        self._emit_progress(count, count if total == 0 else total)
         self.parsed_ready.emit()
 
     def _build_index_from_rows(self, signal_rows):
@@ -703,23 +757,55 @@ class _ParseThread(QThread):
                 lst[0].append(ts)
                 lst[1].append(v)
             rows.append((ts, decoded, None))
+        _ensure_sorted_rows(rows)
+
+    def _stash_series_chunks(self):
+        """Convert buffered per-signal lists to numpy chunks so the boxed
+        float lists never hold an entire signal (~0.5 GB across signals on a
+        750k-frame log) until the very end. Called mid-parse only."""
+        for sig_name, lst in self._series.items():
+            if lst[0]:
+                chunks = self._chunks.setdefault(sig_name, [])
+                chunks.append((np.asarray(lst[0], dtype=np.float64),
+                               np.asarray(lst[1], dtype=np.float64)))
+                lst[0].clear()
+                lst[1].clear()
+
+    def _finalize_series(self):
+        """Concatenate chunks + tail into the final numpy arrays, sorting by
+        timestamp if the log carried out-of-order frames (zigzag lines and
+        the sorted-array searches in the plot both rely on monotonic t)."""
+        for sig_name, lst in self._series.items():
+            parts = self._chunks.pop(sig_name, [])
+            if lst[0]:
+                parts.append((np.asarray(lst[0], dtype=np.float64),
+                              np.asarray(lst[1], dtype=np.float64)))
+                lst[0].clear()
+                lst[1].clear()
+            if len(parts) == 1:
+                t, v = parts[0]
+            elif parts:
+                t = np.concatenate([p[0] for p in parts])
+                v = np.concatenate([p[1] for p in parts])
+            else:
+                t = np.empty(0, dtype=np.float64)
+                v = np.empty(0, dtype=np.float64)
+            if t.size > 1 and np.any(np.diff(t) < 0):
+                order = np.argsort(t, kind="stable")
+                t = t[order]
+                v = v[order]
+            self._series[sig_name] = [t, v]
 
     def _emit_progress(self, done, total):
-        # Convert per-signal python lists to numpy arrays lazily — done once
-        # at the end so the hot loop stays allocation-free.
-        if done >= total:
-            for sig_name, lst in self._series.items():
-                self._series[sig_name] = [
-                    np.asarray(lst[0], dtype=np.float64),
-                    np.asarray(lst[1], dtype=np.float64),
-                ]
         self.progress.emit(done, total)
 
 
 class _ReplayThread(QThread):
     """Timestamp-driven replay that consumes already-decoded rows."""
 
-    message_with_data = pyqtSignal(object, object)
+    # One queued cross-thread event per batch of frames instead of one per
+    # frame — a dense log would otherwise flood the GUI event queue.
+    messages_with_data = pyqtSignal(list)
 
     def __init__(self, rows, speed=1.0, parent=None):
         super().__init__(parent)
@@ -735,6 +821,7 @@ class _ReplayThread(QThread):
             return
         base_ts = self._rows[0][0]
         base_wall = time.time()
+        batch = []
         for row in self._rows:
             if self._stop:
                 return
@@ -743,7 +830,12 @@ class _ReplayThread(QThread):
             target = base_wall + offset / self._speed
             delay = target - time.time()
             if delay > 0.001:
-                # Sleep in 100 ms chunks so we can respond to stop() quickly
+                # Flush everything already due before idling, so the UI sees
+                # those frames at the right time even across large gaps.
+                if batch:
+                    self.messages_with_data.emit(batch)
+                    batch = []
+                # Sleep in 100 ms chunks so we can respond to stop() quickly
                 # even across large timestamp gaps in the log.
                 remaining_ms = int(delay * 1000)
                 while remaining_ms > 0 and not self._stop:
@@ -752,4 +844,9 @@ class _ReplayThread(QThread):
                     remaining_ms -= chunk
                 if self._stop:
                     return
-            self.message_with_data.emit(_FakeMsg(ts), decoded)
+            batch.append((ts, decoded))
+            if len(batch) >= 1000:
+                self.messages_with_data.emit(batch)
+                batch = []
+        if batch:
+            self.messages_with_data.emit(batch)

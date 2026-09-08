@@ -4,13 +4,22 @@ import csv
 import os
 
 import can
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QSettings, QTimer, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTableWidget,
     QTableWidgetItem, QPushButton, QFileDialog, QHeaderView, QLabel,
-    QSpinBox, QMessageBox,
+    QSpinBox, QMessageBox, QCheckBox,
 )
 from signal_plot import SignalPlot
+
+
+def _fmt_value(val):
+    """Table display text for a decoded value. Floats are shown with up to
+    10 significant digits so scale/offset arithmetic noise like
+    -486.20000000000005 reads as -486.2 (CSV export is unaffected)."""
+    if isinstance(val, float):
+        return f"{val:.10g}"
+    return str(val)
 
 
 class LiveView(QWidget):
@@ -33,6 +42,7 @@ class LiveView(QWidget):
         self._table_signals = []          # signals shown as table columns
         self._raw_view = False            # True → table shows raw CAN frames
         self._csv_export_thread = None    # background CSV writer thread
+        self._resize_tick = 0             # throttled resizeColumnsToContents
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -42,6 +52,7 @@ class LiveView(QWidget):
         self._table = QTableWidget()
         self._table.setAlternatingRowColors(True)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.horizontalHeader().setStretchLastSection(True)
         self._tabs.addTab(self._table, "Data Table")
 
         self._plot = SignalPlot()
@@ -63,11 +74,35 @@ class LiveView(QWidget):
 
         btn_layout.addStretch()
 
+        # Display smoothing: default on, remember the last choice.
+        settings = QSettings("CANBusParser", "CANBusParser")
+        smooth_on = settings.value("plot/smooth_enabled", True, type=bool)
+        smooth_win = max(3, settings.value("plot/smooth_window", 9, type=int))
+
+        self._smooth_chk = QCheckBox("Smooth")
+        self._smooth_chk.setFixedHeight(24)
+        self._smooth_chk.setChecked(smooth_on)
+        self._smooth_chk.setToolTip(
+            "Display-only centered moving average. Raw data, the data table "
+            "and CSV exports are never affected.")
+        self._smooth_chk.toggled.connect(self._on_smooth_toggled)
+        btn_layout.addWidget(self._smooth_chk)
+
+        self._smooth_win = QSpinBox()
+        self._smooth_win.setRange(3, 999)
+        self._smooth_win.setValue(smooth_win)
+        self._smooth_win.setFixedWidth(80)
+        self._smooth_win.setFixedHeight(24)
+        self._smooth_win.setSuffix(" pts")
+        self._smooth_win.setEnabled(smooth_on)
+        self._smooth_win.valueChanged.connect(self._on_smooth_changed)
+        btn_layout.addWidget(self._smooth_win)
+
         btn_layout.addWidget(QLabel("Legend:"))
         self._legend_size = QSpinBox()
         self._legend_size.setRange(4, 20)
         self._legend_size.setValue(8)
-        self._legend_size.setFixedWidth(48)
+        self._legend_size.setFixedWidth(54)
         self._legend_size.setFixedHeight(24)
         self._legend_size.valueChanged.connect(self._plot.set_legend_fontsize)
         btn_layout.addWidget(self._legend_size)
@@ -122,10 +157,10 @@ class LiveView(QWidget):
             self._table.setColumnCount(len(headers))
             self._table.setHorizontalHeaderLabels(headers)
             self._table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeToContents)
+                QHeaderView.Interactive)
             self._data_rows = [
                 {"ts": ts, "raw": raw}
-                for ts, _d, raw in self._backend.parsed_messages()
+                for ts, _d, raw in self._backend.parsed_messages()[-self.MAX_TABLE_ROWS:]
                 if raw is not None
             ]
         else:
@@ -138,10 +173,10 @@ class LiveView(QWidget):
             self._table.setColumnCount(len(headers))
             self._table.setHorizontalHeaderLabels(headers)
             self._table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeToContents)
+                QHeaderView.Interactive)
             self._data_rows = [
                 {"ts": ts, "decoded": d}
-                for ts, d, _raw in self._backend.parsed_messages()
+                for ts, d, _raw in self._backend.parsed_messages()[-self.MAX_TABLE_ROWS:]
                 if d is not None
             ]
 
@@ -194,12 +229,12 @@ class LiveView(QWidget):
             self._table.setColumnCount(len(headers))
             self._table.setHorizontalHeaderLabels(headers)
             self._table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeToContents)
+                QHeaderView.Interactive)
             # Rebuild _data_rows from the decoded dict if we were in raw view.
             if not self._data_rows or "decoded" not in self._data_rows[0]:
                 self._data_rows = [
                     {"ts": ts, "decoded": d}
-                    for ts, d, _raw in self._backend.parsed_messages()
+                    for ts, d, _raw in self._backend.parsed_messages()[-self.MAX_TABLE_ROWS:]
                     if d is not None
                 ]
             self._rebuild_table()
@@ -211,10 +246,10 @@ class LiveView(QWidget):
             self._table.setColumnCount(len(headers))
             self._table.setHorizontalHeaderLabels(headers)
             self._table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.ResizeToContents)
+                QHeaderView.Interactive)
             self._data_rows = [
                 {"ts": ts, "raw": raw}
-                for ts, _d, raw in self._backend.parsed_messages()
+                for ts, _d, raw in self._backend.parsed_messages()[-self.MAX_TABLE_ROWS:]
                 if raw is not None
             ]
             self._rebuild_table()
@@ -228,52 +263,63 @@ class LiveView(QWidget):
         (driven by the O(1) numpy index) rendered instantly but the table
         never finished. To keep the UI responsive we:
 
-        * cap the visible rows at ``MAX_TABLE_ROWS`` (showing the most recent
-          rows; ``_data_rows`` still keeps the full dataset for CSV export),
-        * allocate the row count in one shot instead of calling
-          ``insertRow()`` per row (each call triggers a model/view update),
+        * cap ``_data_rows`` itself at ``MAX_TABLE_ROWS`` (the table only
+          ever shows the most recent rows; CSV export reads the backend's
+          full parsed rows directly),
+        * reuse existing QTableWidgetItem cells instead of recreating them
+          on every refresh,
         * silence signals and updates while filling the cells.
         """
         table = self._table
         table.setUpdatesEnabled(False)
         table.blockSignals(True)
-        table.setRowCount(0)
 
-        # Show only the most recent MAX_TABLE_ROWS so the table stays
-        # responsive on large logs. _data_rows keeps the full dataset for
-        # CSV export.
         visible = self._data_rows[-self.MAX_TABLE_ROWS:]
+        # Grow/shrink in place — resetting the row count to 0 destroyed every
+        # cell item and forced a full reallocation on each refresh.
         table.setRowCount(len(visible))
+
+        def set_cell(row_idx, col, text):
+            item = table.item(row_idx, col)
+            if item is None:
+                table.setItem(row_idx, col, QTableWidgetItem(text))
+            elif item.text() != text:
+                item.setText(text)
 
         if self._raw_view:
             # Raw CAN frame view: Timestamp | CAN ID | DLC | Data (hex bytes)
             for row_idx, row in enumerate(visible):
-                table.setItem(row_idx, 0,
-                              QTableWidgetItem(f"{row['ts']:.6f}"))
+                set_cell(row_idx, 0, f"{row['ts']:.6f}")
                 raw = row.get("raw")
                 if raw is not None:
                     can_id, dlc, data = raw
-                    table.setItem(row_idx, 1,
-                                  QTableWidgetItem(f"0x{can_id:03X}"))
-                    table.setItem(row_idx, 2, QTableWidgetItem(str(dlc)))
-                    hex_str = " ".join(f"{b:02X}" for b in data[:dlc])
-                    table.setItem(row_idx, 3, QTableWidgetItem(hex_str))
+                    set_cell(row_idx, 1, f"0x{can_id:03X}")
+                    set_cell(row_idx, 2, str(dlc))
+                    set_cell(row_idx, 3, " ".join(f"{b:02X}" for b in data[:dlc]))
         else:
             # Decoded signal view
             table_signals = self._table_signals
             for row_idx, row in enumerate(visible):
-                table.setItem(row_idx, 0,
-                              QTableWidgetItem(f"{row['ts']:.6f}"))
+                set_cell(row_idx, 0, f"{row['ts']:.6f}")
                 for col, (can_id, sig_name, _sig) in enumerate(table_signals, 1):
                     val = row["decoded"].get(sig_name)
-                    if val is not None:
-                        table.setItem(row_idx, col, QTableWidgetItem(str(val)))
+                    # Empty string, not "skip" — reused cells must not keep
+                    # the previous row's text when a value disappears.
+                    set_cell(row_idx, col, "" if val is None else _fmt_value(val))
 
         table.blockSignals(False)
         table.setUpdatesEnabled(True)
+        # With Interactive resize mode the widths are managed explicitly —
+        # size to the fresh content after each rebuild.
+        table.resizeColumnsToContents()
         table.scrollToBottom()
 
     def _on_message(self, msg, decoded):
+        # Playback mode pre-fills the table and plot from the parsed index;
+        # replay rows would only duplicate them (and corrupt the row buffer
+        # via the front-trim below).
+        if self._backend.mode() == 'playback':
+            return
         if not self._checked_signals or decoded is None:
             return
         # decoded may be {} for multiplexed messages where the frame's mux
@@ -291,14 +337,24 @@ class LiveView(QWidget):
         table = self._table
         data_rows = self._data_rows
         table_signals = self._table_signals
-        plot = self._plot
         max_rows = self.MAX_TABLE_ROWS
 
+        # In playback mode the Signal Plot was already bulk-loaded from the
+        # pre-decoded index (set_series); replay rows are the same points.
+        # Appending them again doubles the series and draws a straight line
+        # from the last point back to the first — there the plot stays
+        # index-driven and only the Data Table consumes replay rows.
+        feed_plot = self._backend.mode() != 'playback'
+
+        # Allocate all rows of the batch in one shot — one insertRow per row
+        # ran the header's size bookkeeping per row, 10x per second.
         table.setUpdatesEnabled(False)
-        for msg, decoded in batch:
+        first = table.rowCount()
+        table.setRowCount(first + len(batch))
+
+        for k, (msg, decoded) in enumerate(batch):
+            row_idx = first + k
             ts = msg.timestamp
-            row_idx = table.rowCount()
-            table.insertRow(row_idx)
             table.setItem(row_idx, 0, QTableWidgetItem(f"{ts:.6f}"))
 
             # Table columns cover every decoded signal; the plot only gets
@@ -306,21 +362,30 @@ class LiveView(QWidget):
             for col, (can_id, sig_name, _sig) in enumerate(table_signals, 1):
                 val = decoded.get(sig_name)
                 if val is not None:
-                    table.setItem(row_idx, col, QTableWidgetItem(str(val)))
+                    table.setItem(row_idx, col, QTableWidgetItem(_fmt_value(val)))
 
-            for can_id, sig_name, _sig in self._checked_signals:
-                val = decoded.get(sig_name)
-                if val is not None:
-                    plot.add_point(ts, can_id, sig_name, val)
+            if feed_plot:
+                for can_id, sig_name, _sig in self._checked_signals:
+                    val = decoded.get(sig_name)
+                    if val is not None:
+                        plot.add_point(ts, can_id, sig_name, val)
 
             # Always keep the row (even when has_value is False) so the
             # timestamp sequence stays continuous for multiplexed messages
             # where some frames don't match the checked mux group.
             data_rows.append({"ts": ts, "decoded": decoded})
 
-        while table.rowCount() > max_rows:
+        excess = table.rowCount() - max_rows
+        for _ in range(max(0, excess)):
             table.removeRow(0)
             data_rows.pop(0)
+
+        # Interactive resize mode (set with the column headers) does not
+        # re-measure on every change; refresh widths ~1x/s instead.
+        self._resize_tick += 1
+        if self._resize_tick >= 10:
+            self._resize_tick = 0
+            table.resizeColumnsToContents()
 
         table.setUpdatesEnabled(True)
         if batch:
@@ -328,6 +393,18 @@ class LiveView(QWidget):
 
     def flush_buffer(self):
         self._flush_buffer()
+
+    def _on_smooth_toggled(self, checked):
+        self._smooth_win.setEnabled(checked)
+        self._plot.set_smoothing(checked, self._smooth_win.value())
+        QSettings("CANBusParser", "CANBusParser").setValue(
+            "plot/smooth_enabled", checked)
+
+    def _on_smooth_changed(self, value):
+        if self._smooth_chk.isChecked():
+            self._plot.set_smoothing(True, value)
+            QSettings("CANBusParser", "CANBusParser").setValue(
+                "plot/smooth_window", value)
 
     def add_signal_instance(self, can_id, sig_name):
         self._plot.add_signal_instance(can_id, sig_name)

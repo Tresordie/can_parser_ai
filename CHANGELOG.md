@@ -2,6 +2,141 @@
 
 ---
 
+## v0.1.4 (2026-09-08) — Bug 修复、性能与健壮性 / Bug Fixes, Performance & Robustness
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 1. 回放解析完成后信号图将起点与终点连成直线（严重）
+
+**问题：** 加载本地 CAN 日志解析绘制完成后，信号曲线上出现一条从曲线起点贯穿到终点的直线。
+
+**原因：** 解析完成后 `load_parsed_series()` 已通过 `set_series()` 将勾选信号的全量历史灌入信号图，随后 `_ReplayThread` 逐帧重新发出，`LiveView._flush_buffer()` 无条件调用 `plot.add_point()` 把同样的点再次追加——数组变成 `[全量历史, 全量历史]`，折线在两份之间画出回绕直线。
+
+**修复：** `_flush_buffer()` 增加模式守卫：回放模式下信号图由预解码索引驱动，跳过 `add_point()`，回放行只进数据表格。
+
+> 涉及文件：`live_view.py` — `_flush_buffer()`
+
+#### 2. 悬浮十字准线与提示框从未渲染（严重）
+
+**问题：** 鼠标悬停在信号图上时，v0.1.3 加入的十字准线与提示框完全不可见。
+
+**原因：** 两个 artist 标记为 `animated=True`（仅 blitting 路径会绘制），而 blitting 管线自 v0.1.1 重构后断裂——`_capture_background()` 无任何调用点，`_blit_enabled` 永远为 `False`，`update_plot` 的 blit 分支不可达，普通渲染又会跳过 animated artist。
+
+**修复：** `_on_draw()`（draw_event）在每次全量渲染后调用 `_capture_background()` 缓存静态场景；新增 `_blit_overlay()`，`_on_hover()` 改为走轻量 blit 路径（restore_region + draw_artist，约 10ms → 与全量重绘 85ms 相比大幅下降）并真正渲染出十字线与提示框。
+
+> 涉及文件：`signal_plot.py` — `_on_draw()`, `_capture_background()`, `_blit_overlay()`, `_on_hover()`
+
+#### 3. 悬停提示吸附到错误信号（中等）
+
+**问题：** 鼠标悬停在电压曲线上（y≈3.3），提示框却显示另一条 0/1 标志信号的 `v = 0`。
+
+**原因：** `_on_hover()` 的最近点搜索只比较 x（时间）距离，忽略鼠标 y 位置——同一时刻附近多条信号都有采样点时，选中的是时间上最近的而非视觉上最近的。
+
+**修复：** 最近点搜索改为屏幕像素空间的双轴距离（`ax.transData.transform` 换算后比较），每个信号在 x 最近采样点附近取 ±2 候选窗口。
+
+> 涉及文件：`signal_plot.py` — `_on_hover()`
+
+#### 4. 窗口四周出现"聚焦框"亮边（中等）
+
+**问题：** 窗口处于活动状态时四周出现一圈细亮色描边，深色界面上非常刺眼，看起来像控件的聚焦框。
+
+**原因：** 本版本开发过程中曾为无边框窗口（`Qt.FramelessWindowHint`）重注 `WS_THICKFRAME` 原生样式以找回 Aero Snap（拖到屏幕顶部自动最大化、边缘拖拽调整大小）。DWM 会为带 thickframe 的活动窗口绘制非客户区亮色轮廓线，即使设置 `DWMWA_NCRENDERING_POLICY = DISABLED` 在 Win10 19045 上也无法完全压制。此外 `main()` 给顶层窗口挂了 `QGraphicsDropShadowEffect` 蓝色辉光——Qt 不支持对顶层窗口应用 QGraphicsEffect，会引发绘制残留，视觉上也是一圈亮边。
+
+**修复：** 移除整套原生 Snap 机制（`showEvent()` 样式注入、`nativeEvent()` 的 WM_NCCALCSIZE/WM_NCHITTEST 处理、`changeEvent()` 外溢补偿）与顶层窗口辉光效果。窗口管理回到自绘标题栏方案：拖动标题栏移动、最大化/还原按钮、双击标题栏最大化/还原。取舍：不再支持拖到屏幕顶部自动最大化与窗口边缘拖拽调整大小。
+
+> 涉及文件：`main.py` — `MainWindow`, `main()`
+
+#### 5. 悬浮提示框盖住鼠标指针（轻微）
+
+**问题：** 鼠标悬停在曲线上时，显示横/纵轴数值的提示框正好画在鼠标指针上，指针与数据点都被遮挡。
+
+**原因：** 提示框锚点直接设在吸附到的数据点坐标上、没有任何偏移，而文本默认从锚点向右上方展开——吸附逻辑保证鼠标就在该点附近，文本框必然盖住指针。
+
+**修复：** 锚点先换算为像素坐标、加 14px 斜向偏移后再反算回数据坐标；并按锚点所在绘图区象限自动翻转展开方向（左右、上下），提示框始终贴在光标斜侧、既不遮指针也不越出绘图区。
+
+> 涉及文件：`signal_plot.py` — `_on_hover()`
+
+### ⚡ 性能优化 / Performance
+
+#### 6. 实时采集 `add_point` 逐点 `np.append` 为 O(n²)（严重）
+
+每个采样点都触发整个 numpy 数组拷贝：实测累计 30k 点耗时 323ms、120k 点 4477ms（对比 list 缓冲 + 批量转换的 2ms/12ms，差距 132~379 倍）。修复后点先进入 Python list 缓冲，由 `update_plot`（250ms 定时）批量并入 numpy 数组，实测 30k 点仅 34ms（O(1)/点）。
+
+> 涉及文件：`signal_plot.py` — `add_point()`, `_drain_buffers()`, `_new_entry()`
+
+#### 7. 其他热点（中等）
+
+- **状态栏逐帧 setText**：`Messages: N` 标签按每帧（500-1000fps）重排，改为 250ms 定时刷新
+- **空转 CanWorker 线程移除**：`workers.py` 的轮询循环体为空（消息实际走 Notifier 推送），整个线程纯浪费，连同 `main.py` 相关创建/等待代码一并移除
+- **表格 flush 批量化**：100ms flush 内逐行 `insertRow` 触发表头 ResizeToContents 逐行重测——改为一次性 `setRowCount` 批量分配行、resize 模式换为 Interactive + 约 1 次/秒的 `resizeColumnsToContents` 节流；`_rebuild_table()` 复用已有 QTableWidgetItem
+- **回放批量 emit**：`_ReplayThread` 逐行跨线程 emit 在密集日志下会淹没 GUI 事件队列——改为按 1000 行/事件边界批量发射，跨线程调用下降两个数量级
+- **解析流式解码**：`messages = list(reader)` 全量物化（75 万帧约 200MB）改为边读边解码，进度按已解析帧数显示
+- **series 分段转 numpy**：解析期间每信号用 Python float 列表攒到最后才转换（约 0.5GB 瞬时开销）——改为每个进度节拍把已有列表转为 numpy 块，结束时 `concatenate`
+
+> 涉及文件：`main.py`、`workers.py`（删除）、`live_view.py`、`can_backend.py`、`signal_plot.py`
+
+#### 8. 滚轮缩放 / 拖动平移卡顿（严重）
+
+**问题：** 鼠标滚轮放大缩小信号图（含点击横轴锁定单轴后的滚轮缩放）时画面明显卡顿，快速滚动后即使停止操作，UI 仍会持续冻结较长时间。
+
+**原因：** 每个滚轮/拖动事件都同步调用 `draw()` 做全画布重绘——24 信号实测一帧 200~280ms，事件排队逐个付费；剖析显示每帧成本大头不是数据点数（点数几乎不影响），而是图例（24 个条目每帧重新测量文本布局，约 150ms）与 constrained_layout 每帧重解布局（约 50ms）。另外缩放后曲线要等 250ms 定时器才按新视野重抽稀，期间重绘的是旧视野数据。
+
+**修复：** 交互事件全部改为 `draw_idle()`（同一轮事件循环内合并为一次重绘）；canvas 交互回调接入 `_on_view_interact()`，事件到达即按新视野重抽稀各条曲线；滚轮/拖动事件持续到达期间临时隐藏图例（≥8 条曲线时才隐藏，避免无谓闪烁），事件停止 180ms 后恢复并补一次全量重绘。实测每个滚轮事件处理耗时从 ~200-300ms 降至 4-8ms。
+
+> 涉及文件：`signal_plot.py` — `_ScrollZoomCanvas.wheelEvent()`, `mouseMoveEvent()`, `_on_axis_click()`, `_on_view_interact()`, `_restore_legend()`
+
+### 🛡 健壮性 / Robustness
+
+#### 9. 乱序时间戳防御（中等）
+
+分段/合并生成的日志可能携带乱序时间戳，会导致折线画花并破坏绘图内部依赖单调性的 `searchsorted` 搜索。解析完成后对每个信号序列做稳定 `argsort`（仅检测到乱序时），行数据同理稳定排序（O(n) 预检，有序时零开销）。
+
+> 涉及文件：`can_backend.py` — `_emit_progress()`, `_ensure_sorted_rows()`
+
+#### 10. 其他（轻微）
+
+- **解析失败后 LogView 卡死**：错误路径不复位按钮状态（Play 禁用无法重试）——`error_occurred` 统一进入 `_on_backend_error()`，复位 LogView 按钮并显示错误
+- **`start_live` 启动竞态**：`_raw_messages` 清空与 `_running=True` 原先在 Notifier 创建之后，启动初期的帧会丢失或落入旧缓冲——已移到 Notifier 之前，且 `start_live()` 返回成功与否、`main._start()` 据此决定是否进入 Live 状态
+- **`stop()` 重复 emit**：部分路径会连续两次调用 `stop()` 导致 `stopped` 重复发射、表格双重 flush——仅在确有会话运行时发射
+
+> 涉及文件：`can_backend.py` — `start_live()`, `stop()`, `_ParseThread.run()`；`main.py` — `_start()`, `_on_backend_error()`
+
+### ✨ 新增功能 / New Features
+
+#### 11. 信号图滑动平均滤波（显示层平滑，可开关）
+
+**问题：** 温度等量化信号在图上呈阶梯/毛刺状，缩放到全览时难以观察趋势。
+
+**方案：** Signal Plot 底栏新增 `Smooth` 开关与窗口点数（3-999 pts，默认 9）：
+
+- 居中滑动平均（部分窗口处理边界），O(n) 向量化计算、无相位偏移、端点无幅度衰减；按信号缓存平滑结果，仅在数据变化或窗口调整时重算
+- 纯显示层滤波：悬浮十字线/提示框吸附并显示平滑值（标注 `MA窗口`），原始序列、数据表格、CSV 导出完全不受影响；实时采集与回放两种模式下均实时生效
+- 开关切换即时重绘，开关往返可随时恢复原始曲线
+- **默认开启**，开关状态与窗口大小通过 QSettings 持久化，重启应用后保持上次设置
+
+> 涉及文件：`signal_plot.py` — `set_smoothing()`, `_moving_average()`, `_display_v()`, `_smoothed()`, `update_plot()`, `_on_hover()`；`live_view.py` — 底栏控件
+
+#### 12. 界面视觉精修（质感提升）
+
+在保留 GitHub Dark 配色体系的前提下重写全局样式表，重点打磨细节：
+
+- **图形元素改为运行时绘制**：下拉箭头、SpinBox 上下箭头、树展开箭头、勾选/半选标记、标题栏最小化/最大化/还原/关闭符号全部由 `QPainter` 抗锯齿绘制成 PNG（同时生成 `@2x` 版本供高分屏使用，配合 `AA_UseHighDpiPixmaps`），启动时写入系统临时目录，箭头/勾选注入 QSS、窗口按钮通过 `QIcon` 使用。顺带修掉了下拉箭头因 `::drop-down::down-arrow` 选择器写法不规范、CSS 三角技巧失效而显示为一段灰色横条的老问题，也替换掉了依赖字体回退、渲染质量不稳定的 Unicode 符号（− □ ❐ ✕）
+- **文字与字体**：标题栏改为纯文本 "CAN Bus Parser"（去掉 ⟐ 装饰符），Start / Stop 按钮去掉 ▶ ■ 前缀；应用字体统一为 Segoe UI 9pt（12px，Windows 标准 UI 字号）并加入 Microsoft YaHei UI 回退，`QLabel` 全局 12px、表格正文 12px，与 QSS 中各控件字号一致——原先默认字体 10pt 与 12px 控件混排，"Legend:" 这类未被 QSS 覆盖的标签比旁边控件大一号
+- **控件风格**：下拉框改为按钮式外观（带 hover/展开态）；普通按钮加细腻纵向渐变，Start/Stop/Parse 分别为绿/红/蓝主操作色并统一 hover/pressed/disabled 态；Tab 改为下划线导航式；树与表格选中行改为半透明蓝（`rgba(31,111,235,0.55)`）并支持整行高亮；勾选框、SpinBox、滚动条（10px 细轨、圆角滑块）、菜单、工具提示、状态栏全部纳入主题
+- **布局与留白**：内容区四周 8px 留白，左右面板间距 6px，标题栏加高至 36px 并给图标留出 8px 内边距，工具栏内边距/间距加大，分隔符可见；表格最后一列自动铺满剩余宽度
+- **数据表格可读性**：浮点值显示改为最多 10 位有效数字（`-486.20000000000005` → `-486.2`），仅影响表格显示，CSV 导出保持原始精度
+
+> 涉及文件：`main.py` — `STYLESHEET`, `_build_ui_icons()`, `_glyph_icon()`, `build_stylesheet()`, `_TitleBar`, `_create_toolbar()`, `_init_ui()`, `_create_central_layout()`, `main()`；`live_view.py` — `_fmt_value()`, 底栏 SpinBox 宽度, 表头 stretch；`log_view.py` — Parse/Stop 按钮 objectName
+
+### 🧹 工程卫生 / Housekeeping
+
+- `requirements.txt`：补上被直接 import 却未声明的 `numpy`；移除全项目未引用的 `uptime`；`pyinstaller` 注明为打包工具
+- 新增 `.gitignore`（`__pycache__/`、`*.pyc`、`dist/`、`build/`、`.zcode/`），停止跟踪 `.pyc`
+- README 运行路径更正；项目结构移除 `workers.py`
+- 本版本各修复/优化均以离屏 Qt 无头回归脚本验证通过（`_verify_*.py`，属过程文件，验证后已清理）
+
+---
+
 ## v0.1.3 (2026-06-27) — Bug 修复与增强 / Bug Fixes & Enhancements
 
 ### 🐛 Bug 修复 / Bug Fixes

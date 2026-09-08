@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.3
+# CAN Bus Parser v0.1.4
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-cd simonyuan_projects/can_parser
+cd can_parser
 python main.py
 ```
 
@@ -119,7 +119,6 @@ can_parser/
 ├── live_view.py         # Live data view: data table + signal plot tabs, CSV export
 ├── log_view.py          # Log playback control panel
 ├── signal_plot.py       # Matplotlib interactive signal time-series plot (blitting + downsampling)
-├── workers.py           # Background polling thread
 ├── requirements.txt     # Python dependencies
 ├── can-bus.png          # Application icon
 ├── cosmo.dbc            # Example DBC (EV, 191 messages)
@@ -133,7 +132,6 @@ can_parser/
 main.py (MainWindow)
   ├── DbcLoader: DBC parsing → QStandardItemModel → QTreeView
   ├── CanBackend: python-can wrapper, capture/playback/decode
-  │     ├── CanWorker: background polling thread (live mode)
   │     ├── _ParseThread: background full-log decoder → signal index
   │     └── _ReplayThread: timestamp-driven playback from decoded index
   ├── LiveView: QTabWidget
@@ -171,6 +169,19 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
 
+### v0.1.4 (2026-09-08)
+
+- **Fix:** Spurious start-to-end line on the signal plot after log parsing — replay rows were double-fed into series already bulk-loaded from the parsed index
+- **Fix:** Hover crosshair/tooltip never rendered (blit background was never captured since the v0.1.1 refactor); blit pipeline restored, hover redraws via a lightweight blit
+- **Fix:** Hover snapped to the wrong signal (x-distance only); nearest-point search now works in display (pixel) space on both axes
+- **Fix:** Hover tooltip covered the mouse cursor; it is now anchored beside the snapped point with a pixel offset and flips sides near the plot edges
+- **Perf:** Buffered `add_point` (O(n²) → O(n) for live capture), batched table flush with throttled column resize, batched replay emission, streamed log decoding with staged numpy conversion (much lower peak memory), per-frame status-bar updates throttled, do-nothing `CanWorker` thread removed
+- **Perf:** Wheel zoom / drag pan no longer stutter — the synchronous full redraw per event became a coalesced `draw_idle`, curves re-decimate against the new view immediately, and the legend (the dominant per-frame cost with many signals) is hidden during an interaction burst and restored 180 ms after it settles
+- **Robustness:** Out-of-order logs are stable-sorted after parse; parse failures restore the LogView buttons; `start_live` startup race fixed and its success is checked; duplicate `stopped` emissions removed
+- **Fix:** Bright "focus frame" outline around the active window removed — the native Aero Snap experiment (WS_THICKFRAME) that caused DWM to draw it, and the top-level glow shadow effect, are both dropped; the window keeps title-bar drag, double-click maximize and the maximize button
+- **UI:** Signal Plot gains a toggleable display-only moving-average filter (`Smooth` + window size in the bottom bar); the hover tooltip follows the smoothed curve while raw data, the table and CSV exports stay untouched
+- **UI:** Visual refresh of the whole app — button-like combo boxes, underline tabs, gradient buttons with green/red/blue primary actions, translucent row selection, slim scroll bars, themed spin boxes/check boxes/menus, more breathing room around panels; all arrows, check marks and window-control symbols are now anti-aliased glyphs rendered at start-up (1x + @2x), which also fixes the combo arrow that rendered as a grey bar; plain "CAN Bus Parser" title and "Start"/"Stop" labels without Unicode ornaments; one consistent Segoe UI 9pt (12px) type scale across the app; table floats are shown with 10 significant digits (CSV export unchanged)
+
 ### v0.1.3 (2026-06-27)
 
 - **Fix:** Stop button crash (`QThread: Destroyed while thread is still running`) fixed in all three code paths: live mode toolbar Stop, playback mode LogView Stop, and long sleep in `_ReplayThread`
@@ -199,8 +210,8 @@ See [CHANGELOG.md](CHANGELOG.md) for full details.
 - Tree-based signal search, batch selection, and cascading checkbox logic
 - Real-time data table with dual-mode CSV export (raw frames / decoded signals)
 - Interactive signal plot (zoom/pan/axis lock/legend highlight) with blitting + view-aware downsampling
-- Frameless custom title bar with app icon and glow shadow
-- Dark theme (GitHub Dark inspired), Segoe UI font
+- Frameless custom title bar with app icon
+- Dark theme (GitHub Dark inspired), Segoe UI font, crisp runtime-rendered glyphs (1x + @2x)
 - Multiplexed signal support, signal instance duplicates, legend font size control
 - PyInstaller standalone executable support
 

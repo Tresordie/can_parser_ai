@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.3
+# CAN Bus Parser v0.1.4
 
 基于 PyQt5 + python-can + cantools 的 CAN 总线数据采集与离线分析桌面工具。
 
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 ## 使用方式
 
 ```bash
-cd simonyuan_projects/can_parser
+cd can_parser
 python main.py
 ```
 
@@ -119,7 +119,6 @@ can_parser/
 ├── live_view.py         # 实时数据视图：数据表 + 信号图标签页，CSV 导出
 ├── log_view.py          # 日志回放控制面板
 ├── signal_plot.py       # Matplotlib 交互式信号时序图（blitting + 降采样）
-├── workers.py           # 后台轮询线程
 ├── requirements.txt     # Python 依赖
 ├── can-bus.png          # 应用图标
 ├── cosmo.dbc            # 示例 DBC（电动车，191 条报文）
@@ -133,7 +132,6 @@ can_parser/
 main.py (MainWindow)
   ├── DbcLoader: DBC 解析 → QStandardItemModel → QTreeView
   ├── CanBackend: python-can 封装，采集/回放/解码
-  │     ├── CanWorker: 后台轮询线程（实时模式）
   │     ├── _ParseThread: 后台全量日志解码 → 信号索引
   │     └── _ReplayThread: 基于时间戳的回放，从索引消费数据
   ├── LiveView: QTabWidget
@@ -171,6 +169,19 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
 
+### v0.1.4 (2026-09-08)
+
+- **修复：** 日志解析完成后信号图出现从起点贯穿到终点的多余直线——回放行被重复灌入已由解析索引批量加载的序列
+- **修复：** 悬浮十字准线与提示框从未渲染（v0.1.1 重构后 blit 背景从未被捕获）；恢复 blit 管线，悬停改走轻量 blit 重绘
+- **修复：** 悬停吸附到错误信号（只比较 x 距离）；最近点搜索改为显示（像素）空间的双轴距离
+- **修复：** 悬浮提示框盖住鼠标指针；改为在吸附点旁加像素偏移锚定，并在靠近绘图区边缘时自动翻转展开方向
+- **性能：** `add_point` 缓冲化（实时采集 O(n²) → O(n)）、表格 flush 批量合并 + 节流列宽重测、回放批量 emit、日志流式解码 + 分段转 numpy（峰值内存大幅下降）、状态栏逐帧刷新改为定时、移除空转的 `CanWorker` 线程
+- **性能：** 滚轮缩放 / 拖动平移不再卡顿——每事件同步全量重绘改为合并的 `draw_idle`，曲线即时按新视野重抽稀，交互事件持续期间临时隐藏图例（多信号时它是每帧成本大头）、事件停止 180ms 后恢复
+- **健壮性：** 乱序日志解析后稳定排序；解析失败恢复 LogView 按钮状态；修复 `start_live` 启动竞态并检查其返回值；去除重复的 `stopped` 发射
+- **修复：** 移除活动窗口四周的"聚焦框"亮边（引发 DWM 绘制亮边的原生 Aero Snap 实验与顶层窗口辉光效果一并去除）；保留标题栏拖动、双击最大化与最大化按钮
+- **界面：** 信号图新增可开关的纯显示层滑动平均滤波（底栏 `Smooth` 开关 + 窗口大小）；悬浮提示跟随平滑曲线，原始数据、表格与 CSV 导出不受影响
+- **界面：** 全应用视觉精修——按钮式下拉框、下划线 Tab、渐变主操作按钮（绿/红/蓝）、半透明行选中、细滚动条、主题化 SpinBox/复选框/菜单、面板留白加大；箭头、勾选与窗口按钮符号改为启动时抗锯齿渲染的字形（1x + @2x），顺带修复下拉箭头显示为灰色横条的老问题；标题与按钮去除 Unicode 装饰符；全局统一 Segoe UI 9pt（12px）字号；表格浮点值按 10 位有效数字显示（CSV 导出不变）
+
 ### v0.1.3 (2026-06-27)
 
 - **修复：** Stop 按钮崩溃（`QThread: 在线程仍在运行时将其销毁`）已在全部三条代码路径中修复：实时模式工具栏 Stop、回放模式 LogView Stop、以及 `_ReplayThread` 长时间休眠
@@ -199,8 +210,8 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 - 树形信号搜索、批量选择与级联复选框逻辑
 - 实时数据表格，双模式 CSV 导出（原始帧 / 已解码信号）
 - 交互式信号时序图（缩放/平移/轴锁定/图例高亮），含 blitting + 视口感知降采样
-- 无边框自定义标题栏，应用图标与发光阴影
-- 深色主题（GitHub Dark 风格），Segoe UI 字体
+- 无边框自定义标题栏，应用图标
+- 深色主题（GitHub Dark 风格），Segoe UI 字体，启动时渲染的清晰字形图标（1x + @2x）
 - 多路复用信号支持、信号实例副本、图例字体大小调节
 - PyInstaller 独立运行包支持
 

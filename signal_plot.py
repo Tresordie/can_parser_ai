@@ -40,7 +40,7 @@ matplotlib.rcParams.update({
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg, NavigationToolbar2QT as _NavToolbarBase
 from matplotlib.figure import Figure
 from matplotlib.backend_bases import MouseButton
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 
@@ -114,12 +114,12 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
             self._pan_start = None
             self._axis_lock = hit if self._axis_lock != hit else None
             self._update_axis_highlight()
-            self.draw()
+            self.draw_idle()
             self._notify_interact()
         else:
             self._axis_lock = None
             self._update_axis_highlight()
-            self.draw()
+            self.draw_idle()
             self._notify_interact()
 
     def _update_axis_highlight(self):
@@ -155,7 +155,7 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
         else:
             ax.set_xlim((cx - (cx - xlim[0]) * scale, cx + (xlim[1] - cx) * scale))
             ax.set_ylim((cy - (cy - ylim[0]) * scale, cy + (ylim[1] - cy) * scale))
-        self.draw()
+        self.draw_idle()
         self._notify_interact()
 
     def mousePressEvent(self, event):
@@ -176,7 +176,7 @@ class _ScrollZoomCanvas(FigureCanvasQTAgg):
             ylim = ax.get_ylim()
             ax.set_xlim(xlim[0] - (x1 - x0), xlim[1] - (x1 - x0))
             ax.set_ylim(ylim[0] - (y1 - y0), ylim[1] - (y1 - y0))
-            self.draw()
+            self.draw_idle()
             self._notify_interact()
         else:
             super().mouseMoveEvent(event)
@@ -199,6 +199,12 @@ class SignalPlot(QWidget):
     # Soft cap on points drawn per line. Above this the view becomes
     # pixel-saturated anyway, so we decimate to keep every frame ~tens of ms.
     _MAX_DISPLAY = 10000
+    # The legend re-measures every entry on each full draw (~150 ms for 24
+    # signals — the dominant cost of a zoom/pan frame). While wheel/pan
+    # events keep arriving it stays hidden and is restored once the burst
+    # settles. Below this many entries the saving isn't worth the flicker.
+    _LEGEND_HIDE_MIN = 8
+    _LEGEND_RESTORE_MS = 180
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -209,7 +215,12 @@ class SignalPlot(QWidget):
                            facecolor="#0d1117", constrained_layout=True)
         self._canvas = _ScrollZoomCanvas(self._fig, self)
         self._canvas._on_resize_cb = self._on_canvas_resize
-        self._canvas._interact_cb = self._invalidate_blit
+        self._canvas._interact_cb = self._on_view_interact
+
+        self._legend_idle_timer = QTimer(self)
+        self._legend_idle_timer.setSingleShot(True)
+        self._legend_idle_timer.setInterval(self._LEGEND_RESTORE_MS)
+        self._legend_idle_timer.timeout.connect(self._restore_legend)
         self._toolbar = _DarkNavToolbar(self._canvas, self)
 
         layout.addWidget(self._toolbar)
@@ -236,6 +247,9 @@ class SignalPlot(QWidget):
         self._picked_line = None
         self._legend = None
         self._legend_fontsize = 8
+        # Display-only moving-average filter (see set_smoothing).
+        self._smooth_enabled = False
+        self._smooth_window = 9
 
         # Blitting state.
         self._blit_enabled = False
@@ -276,11 +290,50 @@ class SignalPlot(QWidget):
         self._view_changed = True
         self._dirty = True
 
+    def _on_view_interact(self):
+        """Canvas callback for wheel-zoom / drag-pan / axis-lock clicks.
+
+        Re-decimates the lines against the new view immediately (instead of
+        waiting for the 250 ms refresh timer, which would draw stale data)
+        and lets ``update_plot`` schedule a coalesced ``draw_idle`` — one
+        full render per event-loop round, not one per queued event.
+        """
+        self._invalidate_blit()
+        if self._legend is not None and len(self._lines) >= self._LEGEND_HIDE_MIN:
+            if self._legend.get_visible():
+                self._legend.set_visible(False)
+            self._legend_idle_timer.start()
+        self.update_plot()
+
+    def _restore_legend(self):
+        if self._legend is not None and not self._legend.get_visible():
+            self._legend.set_visible(True)
+            self._invalidate_blit()
+            self._canvas.draw_idle()
+
     def _capture_background(self):
-        self._canvas.draw_idle()  # ensure layout/limits are committed
-        self._canvas.draw()       # full paint so bbox is current
+        """Cache the just-rendered static scene as the blit background.
+
+        Called from ``_on_draw`` (draw_event) — at that moment the renderer
+        buffer holds the full render, so the copy is exact and cheap. The
+        animated artists (crosshair, tooltip) are skipped by the normal
+        render, so they are never part of the background.
+        """
         self._background = self._canvas.copy_from_bbox(self._ax.bbox)
         self._blit_enabled = True
+
+    def _blit_overlay(self):
+        """Redraw only the animated overlay (crosshair/tooltip) on top of the
+        cached background — a few ms instead of a full canvas re-render."""
+        if not self._blit_enabled or self._background is None:
+            self._canvas.draw_idle()
+            return
+        self._canvas.restore_region(self._background)
+        if self._crosshair.get_visible():
+            self._ax.draw_artist(self._crosshair)
+        if self._tip.get_visible():
+            self._ax.draw_artist(self._tip)
+        self._canvas.blit(self._ax.bbox)
 
     def _on_canvas_resize(self):
         """Called after the canvas has been resized by Qt layout."""
@@ -296,7 +349,7 @@ class SignalPlot(QWidget):
         for line in self._lines.values():
             line.remove()
         for key in self._data:
-            self._data[key] = {"t": np.empty(0), "v": np.empty(0), "dirty": True}
+            self._data[key] = self._new_entry()
         self._lines.clear()
         self._next_inst.clear()
         self._sig_active.clear()
@@ -331,7 +384,7 @@ class SignalPlot(QWidget):
         for i, (can_id, sig_name, _sig_obj) in enumerate(checked_signals):
             sig_key = (can_id, sig_name)
             if sig_key not in self._data:
-                self._data[sig_key] = {"t": np.empty(0), "v": np.empty(0), "dirty": True}
+                self._data[sig_key] = self._new_entry()
 
             if sig_key not in self._sig_active:
                 inst = self._next_inst.get(sig_key, 0)
@@ -365,6 +418,55 @@ class SignalPlot(QWidget):
             self._rebuild_legend()
             self._invalidate_blit()
             self._canvas.draw_idle()
+
+    def set_smoothing(self, enabled, window):
+        """Toggle the display-only centered moving-average filter.
+
+        Purely a view filter: raw series, the data table and CSV exports are
+        never touched. The tooltip snaps to the smoothed curve while the
+        filter is on.
+        """
+        window = max(1, int(window))
+        if enabled == self._smooth_enabled and window == self._smooth_window:
+            return
+        self._smooth_enabled = enabled
+        self._smooth_window = window
+        for entry in self._data.values():
+            entry["dirty"] = True
+        self._dirty = True
+        self.update_plot()
+
+    @staticmethod
+    def _moving_average(v, window):
+        """Centered moving average with partial windows at both edges —
+        O(n), no phase shift, no amplitude shrink at the ends."""
+        n = v.size
+        if window <= 1 or n == 0:
+            return v
+        half = max(1, window // 2)
+        c = np.concatenate(([0.0], np.cumsum(v, dtype=np.float64)))
+        idx = np.arange(n)
+        lo = np.clip(idx - half, 0, n)
+        hi = np.clip(idx + half + 1, 0, n)
+        return (c[hi] - c[lo]) / (hi - lo)
+
+    def _display_v(self, entry):
+        """The value array currently drawn (smoothed when the filter is on
+        and its cached result matches the current series)."""
+        if self._smooth_enabled and self._smooth_window > 1:
+            vs = entry.get("v_smooth")
+            if vs is not None and vs.size == entry["t"].size:
+                return vs
+        return entry["v"]
+
+    def _smoothed(self, entry):
+        vs = entry.get("v_smooth")
+        if (vs is None or entry.get("v_smooth_win") != self._smooth_window
+                or vs.size != entry["t"].size):
+            vs = self._moving_average(entry["v"], self._smooth_window)
+            entry["v_smooth"] = vs
+            entry["v_smooth_win"] = self._smooth_window
+        return vs
 
     def _rebuild_legend(self):
         if self._legend:
@@ -437,6 +539,13 @@ class SignalPlot(QWidget):
     # ------------------------------------------------------------------ #
     # Data ingestion
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _new_entry():
+        # t_buf/v_buf hold live-capture points as plain Python lists between
+        # update_plot ticks — see add_point.
+        return {"t": np.empty(0), "v": np.empty(0), "dirty": True,
+                "t_buf": [], "v_buf": []}
+
     def set_series(self, can_id, sig_name, t_array, v_array):
         """Bulk-load a pre-decoded signal series (O(1) after assignment).
 
@@ -455,32 +564,61 @@ class SignalPlot(QWidget):
             t = t - self._base_ts
         entry["t"] = t
         entry["v"] = v
+        # A bulk load supersedes any buffered points and any cached smoothing.
+        entry["t_buf"].clear()
+        entry["v_buf"].clear()
+        entry.pop("v_smooth", None)
         entry["dirty"] = True
         self._dirty = True
         self._view_set = False
 
     def add_point(self, timestamp, can_id, sig_name, value):
-        """Append a single sample (live capture / streaming replay)."""
+        """Append a single sample (live capture).
+
+        The point lands in a Python-list buffer that update_plot merges into
+        the numpy series in one shot. Appending to the arrays directly is
+        O(n) per point (np.append copies the whole array), which measured
+        ~380x slower than this buffered path and degraded the UI after a few
+        minutes of live capture.
+        """
         if self._base_ts is None:
             self._base_ts = timestamp
         key = (can_id, sig_name)
         entry = self._data.get(key)
         if entry is None:
             return
-        was_empty = entry["t"].size == 0
+        if entry["t"].size == 0 and not entry["t_buf"]:
+            self._view_set = False
         t = timestamp - self._base_ts
         v = float(value.value) if hasattr(value, 'value') else float(value)
-        entry["t"] = np.append(entry["t"], t)
-        entry["v"] = np.append(entry["v"], v)
+        entry["t_buf"].append(t)
+        entry["v_buf"].append(v)
         entry["dirty"] = True
         self._dirty = True
-        if was_empty:
-            self._view_set = False
+
+    def _drain_buffers(self):
+        """Merge buffered live points into the numpy series (batch append)."""
+        for entry in self._data.values():
+            if not entry["t_buf"]:
+                continue
+            t_new = np.asarray(entry["t_buf"], dtype=np.float64)
+            v_new = np.asarray(entry["v_buf"], dtype=np.float64)
+            entry["t_buf"].clear()
+            entry["v_buf"].clear()
+            if entry["t"].size == 0:
+                entry["t"] = t_new
+                entry["v"] = v_new
+            else:
+                entry["t"] = np.concatenate((entry["t"], t_new))
+                entry["v"] = np.concatenate((entry["v"], v_new))
+            entry["dirty"] = True
+            self._dirty = True
 
     # ------------------------------------------------------------------ #
     # Rendering
     # ------------------------------------------------------------------ #
     def update_plot(self):
+        self._drain_buffers()
         if not self._dirty:
             return
         self._dirty = False
@@ -505,6 +643,8 @@ class SignalPlot(QWidget):
             if not force_resample and not entry.get("dirty"):
                 continue
             entry["dirty"] = False
+            if self._smooth_enabled and self._smooth_window > 1:
+                v = self._smoothed(entry)
             xs, ys = self._downsample(t, v)
             line.set_data(xs, ys)
 
@@ -566,55 +706,79 @@ class SignalPlot(QWidget):
         if event.inaxes is None or not self._data:
             self._crosshair.set_visible(False)
             self._tip.set_visible(False)
-            self._canvas.draw_idle()
+            self._blit_overlay()
             return
 
         mx = event.xdata
-        if mx is None:
+        my = event.ydata
+        if mx is None or my is None:
             return
 
-        # Find the closest (t, v) across all loaded signals via binary search.
+        # Find the closest (t, v) across all loaded signals in DISPLAY
+        # space. An x-only comparison snaps to whichever signal has a
+        # sample nearest in time — e.g. a 0/1 flag line — even when the
+        # cursor sits on a different curve's point. Pixel distance
+        # respects both axes.
+        to_disp = self._ax.transData.transform
+        mouse = to_disp((mx, my))
         best_key = None
         best_idx = 0
-        best_dist = float("inf")
+        best_d2 = float("inf")
         for sig_key, entry in self._data.items():
             t = entry["t"]
             if t.size == 0:
                 continue
-            idx = int(np.searchsorted(t, mx))
-            if idx >= len(t):
-                idx = len(t) - 1
-            elif idx > 0 and abs(t[idx - 1] - mx) < abs(t[idx] - mx):
-                idx -= 1
-            d = abs(t[idx] - mx)
-            if d < best_dist:
-                best_dist = d
+            # Snap to the curve actually drawn (smoothed when the filter is
+            # on) so the tooltip value matches the visible geometry.
+            v = self._display_v(entry)
+            # Candidate window: the x-nearest sample plus its neighbours —
+            # on a steep segment the pixel-closest point can sit a sample
+            # or two away in x.
+            idx = min(int(np.searchsorted(t, mx)), t.size - 1)
+            lo = max(0, idx - 2)
+            hi = min(t.size, idx + 3)
+            pts = to_disp(np.column_stack((t[lo:hi], v[lo:hi])))
+            d2 = ((pts - mouse) ** 2).sum(axis=1)
+            j = int(np.argmin(d2))
+            if d2[j] < best_d2:
+                best_d2 = float(d2[j])
                 best_key = sig_key
-                best_idx = idx
+                best_idx = lo + j
 
         if best_key is None:
             self._crosshair.set_visible(False)
             self._tip.set_visible(False)
-            self._canvas.draw_idle()
+            self._blit_overlay()
             return
 
         can_id, sig_name = best_key
         entry = self._data[best_key]
         tx = float(entry["t"][best_idx])
-        tv = float(entry["v"][best_idx])
+        tv = float(self._display_v(entry)[best_idx])
 
         self._crosshair.set_xdata([tx, tx])
         self._crosshair.set_visible(True)
 
         label = f"0x{can_id:03X}/{sig_name}\nt = {tx:.6f} s\nv = {tv:.6g}"
+        if self._smooth_enabled and self._smooth_window > 1:
+            label += f" (MA{self._smooth_window})"
         self._tip.set_text(label)
-        # Place the tooltip near the data point, clamped to the visible y-range.
+        # Place the tooltip beside the data point with a pixel offset so the
+        # text box never covers the cursor; flip sides near the axes edges.
         y_lo, y_hi = self._ax.get_ylim()
         ty = max(y_lo, min(y_hi, tv))
-        self._tip.set_position((tx, ty))
+        px, py = to_disp((tx, ty))
+        ax_bbox = self._ax.bbox
+        dx = 14 if px < ax_bbox.x0 + ax_bbox.width / 2 else -14
+        dy = 14 if py < ax_bbox.y0 + ax_bbox.height / 2 else -14
+        self._tip.set_ha("left" if dx > 0 else "right")
+        self._tip.set_va("bottom" if dy > 0 else "top")
+        self._tip.set_position(
+            self._ax.transData.inverted().transform((px + dx, py + dy))
+        )
         self._tip.set_visible(True)
 
-        self._canvas.draw_idle()
+        self._blit_overlay()
 
     def _on_click(self, event):
         # Check the legend first — it may overlap the axes or sit outside it,
@@ -730,3 +894,8 @@ class SignalPlot(QWidget):
         # keep our reference in sync
         if leg is not None and leg is not self._legend:
             self._legend = leg
+        # The static scene was just rendered — cache it as the blit
+        # background. Without this the animated artists (crosshair, tooltip)
+        # are never drawn anywhere: a normal render skips them and no blit
+        # path can run because _blit_enabled stays False forever.
+        self._capture_background()

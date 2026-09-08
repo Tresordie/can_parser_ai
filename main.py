@@ -2,9 +2,10 @@
 
 import os
 import sys
+import tempfile
 
-from PyQt5.QtCore import QPoint, Qt
-from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtCore import QPointF, QSize, Qt, QTimer
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
@@ -29,270 +30,404 @@ from can_backend import CanBackend
 from dbc_loader import DbcLoader
 from live_view import LiveView
 from log_view import LogView
-from workers import CanWorker
 
 STYLESHEET = """
 /* ── Global ── */
-QMainWindow { background-color: #0f1117; }
-QWidget#mainWrapper { background-color: #0f1117; }
+QMainWindow { background-color: #0d1117; }
+QWidget#mainWrapper { background-color: #0d1117; }
+QLabel { color: #e6edf3; font-size: 12px; }
 
 /* ── Title bar ── */
 #titleBar {
-    background-color: #161b22; border-bottom: 1px solid #21262d;
+    background-color: #161b22;
+    border-bottom: 1px solid #21262d;
 }
+#titleLabel {
+    color: #e6edf3; font-size: 13px; font-weight: 600;
+    padding-left: 6px; letter-spacing: 0.4px;
+}
+QPushButton#titleBtn, QPushButton#titleClose {
+    background-color: transparent;
+    border: none; border-radius: 0px; padding: 0px;
+}
+QPushButton#titleBtn:hover { background-color: #21262d; }
+QPushButton#titleBtn:pressed { background-color: #30363d; }
+QPushButton#titleClose:hover { background-color: #da3633; }
+QPushButton#titleClose:pressed { background-color: #b62324; }
 
 /* ── Toolbar ── */
 QToolBar {
-    background-color: #161b22; border-bottom: 1px solid #21262d;
-    padding: 4px 6px; spacing: 4px;
+    background-color: #161b22; border: none;
+    border-bottom: 1px solid #21262d;
+    padding: 6px 10px; spacing: 8px;
 }
+QToolBar::separator { width: 1px; background-color: #30363d; margin: 5px 6px; }
 QToolBar QLabel { color: #8b949e; font-size: 12px; font-weight: 600; }
-QToolBar QToolButton { padding: 4px 8px; }
 
-/* ── Line edit ── */
+/* ── Text inputs ── */
 QLineEdit {
     background-color: #0d1117; color: #e6edf3;
     border: 1px solid #30363d; border-radius: 6px;
     padding: 5px 10px; font-size: 12px;
+    selection-background-color: #1f6feb; selection-color: #ffffff;
 }
+QLineEdit:hover { border-color: #484f58; }
 QLineEdit:focus { border-color: #58a6ff; }
-QLineEdit:disabled { background-color: #161b22; color: #484f58; }
+QLineEdit:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
 
-/* ── Combo box ── */
+/* ── Combo box (button-like) ── */
 QComboBox {
-    background-color: #0d1117; color: #e6edf3;
+    background-color: #21262d; color: #e6edf3;
     border: 1px solid #30363d; border-radius: 6px;
-    padding: 4px 10px; font-size: 12px; min-width: 100px;
+    padding: 4px 28px 4px 10px; font-size: 12px; font-weight: 600;
+    min-width: 90px;
 }
-QComboBox:hover { border-color: #58a6ff; }
+QComboBox:hover { background-color: #30363d; border-color: #8b949e; }
+QComboBox:on { background-color: #161b22; border-color: #58a6ff; }
 QComboBox:focus { border-color: #58a6ff; }
-QComboBox:disabled { background-color: #161b22; color: #484f58; }
+QComboBox:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
 QComboBox::drop-down {
-    border: none; width: 24px;
     subcontrol-origin: padding; subcontrol-position: top right;
+    width: 24px; border: none;
 }
-QComboBox::drop-down::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid #8b949e;
-    margin-right: 6px;
-}
+QComboBox::down-arrow { image: url(@chevron_down@); width: 10px; height: 6px; }
+QComboBox::down-arrow:disabled { image: url(@chevron_down_dim@); }
 QComboBox QAbstractItemView {
     background-color: #161b22; color: #e6edf3;
+    border: 1px solid #30363d; padding: 4px; outline: none;
     selection-background-color: #1f6feb; selection-color: #ffffff;
-    border: 1px solid #30363d; border-radius: 6px;
-    outline: none; padding: 4px;
 }
+QComboBox QAbstractItemView::item { min-height: 26px; padding: 0px 10px; border-radius: 4px; }
+QComboBox QAbstractItemView::item:hover { background-color: #21262d; }
+QComboBox QAbstractItemView::item:selected { background-color: #1f6feb; color: #ffffff; }
 
 /* ── Push buttons ── */
 QPushButton {
-    background-color: #21262d; color: #e6edf3;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #272d35, stop:1 #21262d);
+    color: #e6edf3;
     border: 1px solid #30363d; border-radius: 6px;
     padding: 5px 14px; font-size: 12px; font-weight: 600;
 }
-QPushButton:hover { background-color: #30363d; border-color: #8b949e; }
-QPushButton:pressed { background-color: #0d1117; }
-QPushButton:disabled {
-    background-color: #161b22; color: #484f58;
-    border: 1px solid #21262d;
+QPushButton:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #30363d, stop:1 #2a3139);
+    border-color: #8b949e;
 }
+QPushButton:pressed { background-color: #161b22; border-color: #30363d; }
+QPushButton:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
 
-/* ── Title bar buttons ── */
-QPushButton#titleBtn {
-    background-color: transparent; color: #8b949e;
-    border: none; border-radius: 0px;
-    padding: 0px; font-size: 16px; font-weight: normal;
-    min-width: 46px; min-height: 34px;
+QPushButton#startBtn {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #2ea043, stop:1 #238636);
+    color: #ffffff; border: 1px solid #2ea043;
+    padding: 5px 16px; font-weight: 700;
 }
-QPushButton#titleBtn:hover { background-color: #21262d; color: #e6edf3; }
-QPushButton#titleClose {
-    background-color: transparent; color: #8b949e;
-    border: none; border-radius: 0px; padding: 0px;
-    font-size: 16px; min-width: 46px; min-height: 34px;
+QPushButton#startBtn:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #3fb950, stop:1 #2ea043);
+    border-color: #3fb950;
 }
-QPushButton#titleClose:hover { background-color: #da3633; color: #ffffff; }
+QPushButton#startBtn:pressed { background-color: #196c2e; }
+QPushButton#startBtn:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
+
+QPushButton#stopBtn {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #f85149, stop:1 #da3633);
+    color: #ffffff; border: 1px solid #f85149;
+    padding: 5px 16px; font-weight: 700;
+}
+QPushButton#stopBtn:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #ff7b72, stop:1 #f85149);
+    border-color: #ff7b72;
+}
+QPushButton#stopBtn:pressed { background-color: #b62324; }
+QPushButton#stopBtn:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
+
+QPushButton#parseBtn {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #388bfd, stop:1 #1f6feb);
+    color: #ffffff; border: 1px solid #388bfd;
+    padding: 5px 16px; font-weight: 700;
+}
+QPushButton#parseBtn:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                      stop:0 #58a6ff, stop:1 #388bfd);
+    border-color: #58a6ff;
+}
+QPushButton#parseBtn:pressed { background-color: #1a5fd0; }
+QPushButton#parseBtn:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
+
+/* ── Check box ── */
+QCheckBox { color: #e6edf3; font-size: 12px; spacing: 6px; }
+QCheckBox:disabled { color: #484f58; }
+QCheckBox::indicator {
+    width: 14px; height: 14px;
+    border: 1px solid #484f58; border-radius: 4px;
+    background-color: #0d1117;
+}
+QCheckBox::indicator:hover { border-color: #58a6ff; background-color: #161b22; }
+QCheckBox::indicator:checked { background-color: #1f6feb; border-color: #388bfd; image: url(@check@); }
+QCheckBox::indicator:checked:hover { background-color: #388bfd; border-color: #58a6ff; }
+QCheckBox::indicator:disabled { border-color: #30363d; background-color: #161b22; }
 
 /* ── Tree view ── */
 QTreeView {
     background-color: #0d1117; color: #e6edf3;
     border: 1px solid #21262d; border-radius: 6px;
-    font-size: 12px; alternate-background-color: #161b22;
-    outline: none; padding: 2px;
+    font-size: 12px; alternate-background-color: #10151c;
+    outline: none; padding: 4px;
+    show-decoration-selected: 1;
 }
-QTreeView::item {
-    padding: 3px 4px; border-radius: 3px;
-}
+QTreeView::item { padding: 4px 4px; border-radius: 4px; }
 QTreeView::item:hover { background-color: #161b22; }
-QTreeView::item:selected { background-color: #1f6feb; color: #ffffff; }
-QTreeView::item:selected:hover { background-color: #388bfd; }
+QTreeView::item:selected { background-color: rgba(31, 111, 235, 0.55); color: #ffffff; }
+QTreeView::item:selected:hover { background-color: rgba(31, 111, 235, 0.7); }
+QTreeView::branch:has-children:!has-siblings:closed,
+QTreeView::branch:closed:has-children:has-siblings {
+    border-image: none; image: url(@chevron_right@);
+}
+QTreeView::branch:open:has-children:!has-siblings,
+QTreeView::branch:open:has-children:has-siblings {
+    border-image: none; image: url(@chevron_down@);
+}
 QTreeView::indicator {
     width: 14px; height: 14px;
-    border: 1px solid #484f58; border-radius: 3px;
+    border: 1px solid #484f58; border-radius: 4px;
     background-color: #0d1117;
 }
-QTreeView::indicator:hover {
-    border-color: #58a6ff;
+QTreeView::indicator:hover { border-color: #58a6ff; background-color: #161b22; }
+QTreeView::indicator:checked { background-color: #1f6feb; border-color: #388bfd; image: url(@check@); }
+QTreeView::indicator:checked:hover { background-color: #388bfd; border-color: #58a6ff; }
+QTreeView::indicator:indeterminate { background-color: #1f6feb; border-color: #388bfd; image: url(@dash@); }
+QTreeView::indicator:indeterminate:hover { background-color: #388bfd; border-color: #58a6ff; }
+
+/* ── Headers ── */
+QHeaderView { background-color: transparent; border: none; }
+QHeaderView::section {
+    background-color: #161b22; color: #8b949e;
+    border: none; border-bottom: 1px solid #21262d; border-right: 1px solid #21262d;
+    padding: 6px 8px; font-size: 11px; font-weight: 600;
 }
-QTreeView::indicator:checked {
-    background-color: #1f6feb; border-color: #58a6ff;
-    image: none;
-}
-QTreeView::indicator:checked:hover {
-    background-color: #388bfd; border-color: #58a6ff;
-}
-QTreeView::indicator:indeterminate {
-    background-color: #30363d; border-color: #484f58;
+QHeaderView::section:last, QHeaderView::section:only-one { border-right: none; }
+QHeaderView::section:hover { color: #e6edf3; background-color: #1c2128; }
+QTableCornerButton::section {
+    background-color: #161b22; border: none;
+    border-bottom: 1px solid #21262d; border-right: 1px solid #21262d;
 }
 
 /* ── Table widget ── */
 QTableWidget {
     background-color: #0d1117; color: #e6edf3;
     border: 1px solid #21262d; border-radius: 6px;
-    gridline-color: #21262d; font-size: 11px;
-    alternate-background-color: #161b22;
-    outline: none;
+    gridline-color: #161b22; font-size: 12px;
+    alternate-background-color: #10151c; outline: none;
+    selection-background-color: rgba(31, 111, 235, 0.55); selection-color: #ffffff;
 }
-QTableWidget::item {
-    padding: 2px 6px; border-bottom: 1px solid #161b22;
-}
-QTableWidget::item:selected { background-color: #1f6feb; color: #ffffff; }
-QHeaderView::section {
-    background-color: #161b22; color: #8b949e;
-    border: none; border-bottom: 1px solid #21262d;
-    border-right: 1px solid #21262d;
-    padding: 5px 8px; font-size: 11px; font-weight: 600;
-}
+QTableWidget::item { padding: 3px 8px; border: none; }
+QTableWidget::item:hover { background-color: #161b22; }
+QTableWidget::item:selected { background-color: rgba(31, 111, 235, 0.55); color: #ffffff; }
 
-/* ── Tab widget ── */
+/* ── Tab widget (underline tabs) ── */
 QTabWidget::pane {
     background-color: #0d1117; border: 1px solid #21262d;
     border-radius: 6px; top: -1px;
 }
+QTabWidget::tab-bar { left: 6px; }
+QTabBar { background-color: transparent; }
 QTabBar::tab {
-    background-color: #161b22; color: #8b949e;
-    border: 1px solid #21262d; border-bottom: none;
-    border-top-left-radius: 6px; border-top-right-radius: 6px;
-    padding: 6px 18px; font-size: 12px; margin-right: 2px;
-    min-width: 80px;
+    background-color: transparent; color: #8b949e;
+    border: none; border-bottom: 2px solid transparent;
+    padding: 7px 14px 8px 14px; margin-right: 6px;
+    font-size: 12px; font-weight: 600; min-width: 80px;
 }
-QTabBar::tab:selected {
-    background-color: #0d1117; color: #58a6ff;
-    border-bottom: 2px solid #58a6ff;
-}
-QTabBar::tab:hover:!selected { color: #e6edf3; background-color: #21262d; }
+QTabBar::tab:hover:!selected { color: #e6edf3; }
+QTabBar::tab:selected { color: #e6edf3; border-bottom: 2px solid #58a6ff; }
 
 /* ── Splitter ── */
-QSplitter::handle { background-color: #21262d; width: 4px; border-radius: 2px; }
-QSplitter::handle:hover { background-color: #1f6feb; }
+QSplitter::handle { background-color: transparent; }
+QSplitter::handle:horizontal { width: 6px; }
+QSplitter::handle:vertical { height: 6px; }
+QSplitter::handle:hover { background-color: #1f6feb; border-radius: 3px; }
 
 /* ── Status bar ── */
 QStatusBar {
     background-color: #161b22; color: #8b949e;
-    border-top: 1px solid #21262d; font-size: 11px; padding: 2px 8px;
+    border-top: 1px solid #21262d; font-size: 11px;
 }
+QStatusBar::item { border: none; }
+QStatusBar QLabel { color: #8b949e; font-size: 11px; padding: 0px 6px; }
 
 /* ── Scroll bars ── */
-QScrollBar:vertical {
-    background-color: #0d1117; width: 8px; border: none;
-}
-QScrollBar::handle:vertical {
-    background-color: #30363d; border-radius: 4px; min-height: 30px;
-}
+QScrollBar:vertical { background-color: transparent; width: 10px; margin: 2px; border: none; }
+QScrollBar::handle:vertical { background-color: #30363d; border-radius: 3px; min-height: 32px; }
 QScrollBar::handle:vertical:hover { background-color: #484f58; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+QScrollBar::handle:vertical:pressed { background-color: #6e7681; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: none; border: none; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
 
-QScrollBar:horizontal {
-    background-color: #0d1117; height: 8px; border: none;
-}
-QScrollBar::handle:horizontal {
-    background-color: #30363d; border-radius: 4px; min-width: 30px;
-}
+QScrollBar:horizontal { background-color: transparent; height: 10px; margin: 2px; border: none; }
+QScrollBar::handle:horizontal { background-color: #30363d; border-radius: 3px; min-width: 32px; }
 QScrollBar::handle:horizontal:hover { background-color: #484f58; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }
+QScrollBar::handle:horizontal:pressed { background-color: #6e7681; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: none; border: none; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+QAbstractScrollArea::corner { background-color: transparent; }
 
 /* ── Spin box ── */
 QSpinBox {
     background-color: #0d1117; color: #e6edf3;
     border: 1px solid #30363d; border-radius: 6px;
-    padding: 3px 8px; font-size: 12px;
+    padding: 2px 2px 2px 6px; font-size: 12px;
+    selection-background-color: #1f6feb; selection-color: #ffffff;
 }
+QSpinBox:hover { border-color: #484f58; }
 QSpinBox:focus { border-color: #58a6ff; }
+QSpinBox:disabled { background-color: #161b22; color: #484f58; border-color: #21262d; }
 QSpinBox::up-button, QSpinBox::down-button {
-    background-color: #21262d; border: none; width: 16px;
+    subcontrol-origin: border; width: 16px;
+    background-color: #161b22; border: none; border-left: 1px solid #30363d;
 }
-QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: #30363d; }
-QSpinBox::up-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-bottom: 4px solid #8b949e;
-}
-QSpinBox::down-arrow {
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 4px solid #8b949e;
-}
+QSpinBox::up-button { subcontrol-position: top right; border-top-right-radius: 5px; }
+QSpinBox::down-button { subcontrol-position: bottom right; border-bottom-right-radius: 5px; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover { background-color: #21262d; }
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed { background-color: #30363d; }
+QSpinBox::up-button:disabled, QSpinBox::down-button:disabled { border-left-color: #21262d; }
+QSpinBox::up-arrow { image: url(@chevron_up_s@); width: 8px; height: 5px; }
+QSpinBox::down-arrow { image: url(@chevron_down_s@); width: 8px; height: 5px; }
+QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off { image: url(@chevron_up_s_dim@); }
+QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off { image: url(@chevron_down_s_dim@); }
 
 /* ── Menu ── */
 QMenu {
     background-color: #161b22; color: #e6edf3;
     border: 1px solid #30363d; border-radius: 6px;
-    padding: 4px;
+    padding: 6px;
 }
-QMenu::item { padding: 6px 24px; border-radius: 4px; }
+QMenu::item { padding: 6px 28px 6px 12px; border-radius: 4px; font-size: 12px; }
 QMenu::item:selected { background-color: #1f6feb; color: #ffffff; }
-QMenu::separator { height: 1px; background-color: #21262d; margin: 4px 8px; }
+QMenu::item:disabled { color: #484f58; }
+QMenu::separator { height: 1px; background-color: #21262d; margin: 6px 8px; }
 
 /* ── Tooltip ── */
 QToolTip {
     background-color: #161b22; color: #e6edf3;
-    border: 1px solid #30363d; border-radius: 6px;
-    padding: 4px 8px; font-size: 11px;
+    border: 1px solid #30363d; border-radius: 4px;
+    padding: 5px 8px; font-size: 11px;
 }
 
-/* ── Action buttons ── */
-QPushButton#startBtn {
-    background-color: #238636; color: #ffffff;
-    border: 1px solid #2ea043; border-radius: 6px;
-    padding: 5px 16px; font-size: 12px; font-weight: 700;
-}
-QPushButton#startBtn:hover { background-color: #2ea043; }
-QPushButton#startBtn:pressed { background-color: #196c2e; }
-QPushButton#startBtn:disabled {
-    background-color: #161b22; color: #484f58; border: 1px solid #21262d;
-}
-QPushButton#stopBtn {
-    background-color: #da3633; color: #ffffff;
-    border: 1px solid #f85149; border-radius: 6px;
-    padding: 5px 16px; font-size: 12px; font-weight: 700;
-}
-QPushButton#stopBtn:hover { background-color: #f85149; }
-QPushButton#stopBtn:pressed { background-color: #b62324; }
-QPushButton#stopBtn:disabled {
-    background-color: #161b22; color: #484f58; border: 1px solid #21262d;
-}
+/* ── Message box ── */
+QMessageBox { background-color: #161b22; }
+QMessageBox QLabel { color: #e6edf3; font-size: 12px; }
 
-/* ── Progress bar (for parsing indicator) ── */
+/* ── Progress bar ── */
 QProgressBar {
     background-color: #0d1117; border: 1px solid #30363d;
     border-radius: 4px; text-align: center; color: #8b949e;
     font-size: 11px; min-height: 18px;
 }
-QProgressBar::chunk {
-    background-color: #1f6feb; border-radius: 3px;
-}
+QProgressBar::chunk { background-color: #1f6feb; border-radius: 3px; }
 """
 
-TITLE_BAR_STYLE = """
-#titleLabel {
-    color: #e6edf3; font-size: 13px; font-weight: 700;
-    padding-left: 10px; letter-spacing: 0.3px;
-}
-"""
+
+_ui_icons_cache = None
+
+
+def _build_ui_icons():
+    """Paint the small glyphs the UI needs (chevrons, check marks, window
+    control symbols) to PNG files and return {name: path}. QSS cannot draw
+    shapes itself, the CSS border-triangle trick renders as a solid bar
+    under Fusion, and Unicode symbols depend on font fallback — so they are
+    rendered once per run (1x and @2x for high-DPI screens)."""
+    global _ui_icons_cache
+    if _ui_icons_cache is not None:
+        return _ui_icons_cache
+    out_dir = os.path.join(tempfile.gettempdir(), "can_parser_ui")
+    os.makedirs(out_dir, exist_ok=True)
+    # name: (width, height, pen width, [polyline, ...])
+    chevrons = {
+        "chevron_down": (10, 6, 1.5, [[(1.5, 1.5), (5, 4.5), (8.5, 1.5)]]),
+        "chevron_up": (10, 6, 1.5, [[(1.5, 4.5), (5, 1.5), (8.5, 4.5)]]),
+        "chevron_right": (6, 10, 1.5, [[(1.5, 1.5), (4.5, 5), (1.5, 8.5)]]),
+        "chevron_down_s": (8, 5, 1.4, [[(1.2, 1.2), (4, 3.8), (6.8, 1.2)]]),
+        "chevron_up_s": (8, 5, 1.4, [[(1.2, 3.8), (4, 1.2), (6.8, 3.8)]]),
+    }
+    marks = {
+        "check": (14, 14, 2.0, [[(3, 7.2), (6, 10.2), (11, 4.4)]]),
+        "dash": (14, 14, 2.0, [[(3.5, 7), (10.5, 7)]]),
+    }
+    window_controls = {
+        "win_min": (10, 10, 1.2, [[(1.5, 5.5), (8.5, 5.5)]]),
+        "win_max": (
+            10,
+            10,
+            1.2,
+            [[(1.5, 1.5), (8.5, 1.5), (8.5, 8.5), (1.5, 8.5), (1.5, 1.5)]],
+        ),
+        "win_restore": (
+            10,
+            10,
+            1.2,
+            [
+                [(1.5, 3.5), (6.5, 3.5), (6.5, 8.5), (1.5, 8.5), (1.5, 3.5)],
+                [(3.5, 3.5), (3.5, 1.5), (8.5, 1.5), (8.5, 6.5), (6.5, 6.5)],
+            ],
+        ),
+        "win_close": (
+            10,
+            10,
+            1.2,
+            [[(1.5, 1.5), (8.5, 8.5)], [(8.5, 1.5), (1.5, 8.5)]],
+        ),
+    }
+    paths = {}
+
+    def render(name, w, h, pen_w, polylines, color):
+        for scale, suffix in ((1, ""), (2, "@2x")):
+            pix = QPixmap(w * scale, h * scale)
+            pix.fill(Qt.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.scale(scale, scale)
+            p.setPen(
+                QPen(QColor(color), pen_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            )
+            for pts in polylines:
+                p.drawPolyline(QPolygonF([QPointF(x, y) for x, y in pts]))
+            p.end()
+            pix.save(os.path.join(out_dir, f"{name}{suffix}.png"), "PNG")
+        paths[name] = os.path.join(out_dir, f"{name}.png").replace("\\", "/")
+
+    for name, (w, h, pen_w, polys) in chevrons.items():
+        render(name, w, h, pen_w, polys, "#8b949e")
+        render(name + "_dim", w, h, pen_w, polys, "#484f58")
+    for name, (w, h, pen_w, polys) in marks.items():
+        render(name, w, h, pen_w, polys, "#ffffff")
+    for name, (w, h, pen_w, polys) in window_controls.items():
+        render(name, w, h, pen_w, polys, "#c9d1d9")
+    _ui_icons_cache = paths
+    return paths
+
+
+def _glyph_icon(name):
+    """QIcon for a runtime-rendered glyph, with its @2x variant attached so
+    it stays crisp on high-DPI screens."""
+    path = _build_ui_icons()[name]
+    icon = QIcon(path)
+    hi_res = path[:-4] + "@2x.png"
+    if os.path.exists(hi_res):
+        pix = QPixmap(hi_res)
+        pix.setDevicePixelRatio(2.0)
+        icon.addPixmap(pix)
+    return icon
+
+
+def build_stylesheet():
+    sheet = STYLESHEET
+    for name, path in _build_ui_icons().items():
+        sheet = sheet.replace(f"@{name}@", path)
+    return sheet
 
 
 class _TitleBar(QWidget):
@@ -304,7 +439,7 @@ class _TitleBar(QWidget):
         self._drag_pos = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 0, 0, 0)
         layout.setSpacing(0)
 
         icon_label = QLabel()
@@ -313,40 +448,46 @@ class _TitleBar(QWidget):
                 20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
             icon_label.setPixmap(pix)
-            icon_label.setFixedSize(24, 32)
+            icon_label.setFixedSize(28, 36)
             icon_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(icon_label)
 
-        self._icon = QLabel("⟐  CAN Bus Parser")
+        self._icon = QLabel("CAN Bus Parser")
         self._icon.setObjectName("titleLabel")
-        self._icon.setMinimumHeight(34)
+        self._icon.setMinimumHeight(36)
         layout.addWidget(self._icon, 1)
 
-        btn_min = QPushButton("−")
+        btn_min = QPushButton()
         btn_min.setObjectName("titleBtn")
+        btn_min.setIcon(_glyph_icon("win_min"))
+        btn_min.setIconSize(QSize(10, 10))
         btn_min.clicked.connect(parent.showMinimized)
-        btn_min.setFixedSize(40, 32)
+        btn_min.setFixedSize(44, 36)
         layout.addWidget(btn_min)
 
-        self._btn_max = QPushButton("□")
+        self._btn_max = QPushButton()
         self._btn_max.setObjectName("titleBtn")
+        self._btn_max.setIcon(_glyph_icon("win_max"))
+        self._btn_max.setIconSize(QSize(10, 10))
         self._btn_max.clicked.connect(self._toggle_max)
-        self._btn_max.setFixedSize(40, 32)
+        self._btn_max.setFixedSize(44, 36)
         layout.addWidget(self._btn_max)
 
-        btn_close = QPushButton("✕")
+        btn_close = QPushButton()
         btn_close.setObjectName("titleClose")
+        btn_close.setIcon(_glyph_icon("win_close"))
+        btn_close.setIconSize(QSize(10, 10))
         btn_close.clicked.connect(parent.close)
-        btn_close.setFixedSize(40, 32)
+        btn_close.setFixedSize(44, 36)
         layout.addWidget(btn_close)
 
     def _toggle_max(self):
         if self._parent.isMaximized():
             self._parent.showNormal()
-            self._btn_max.setText("□")
+            self._btn_max.setIcon(_glyph_icon("win_max"))
         else:
             self._parent.showMaximized()
-            self._btn_max.setText("❐")
+            self._btn_max.setIcon(_glyph_icon("win_restore"))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -378,7 +519,6 @@ class MainWindow(QMainWindow):
 
         self._dbc_loader = DbcLoader()
         self._backend = CanBackend()
-        self._worker = None
         self._live_view = LiveView(self._backend, self._dbc_loader)
         self._log_view = LogView()
 
@@ -405,7 +545,7 @@ class MainWindow(QMainWindow):
 
         content = QWidget()
         cl = QVBoxLayout(content)
-        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setContentsMargins(8, 8, 8, 8)
         self._create_central_layout(cl)
         wl.addWidget(content, 1)
 
@@ -455,9 +595,9 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        self._start_btn = QPushButton("▶ Start")
+        self._start_btn = QPushButton("Start")
         self._start_btn.setObjectName("startBtn")
-        self._stop_btn = QPushButton("■ Stop")
+        self._stop_btn = QPushButton("Stop")
         self._stop_btn.setObjectName("stopBtn")
         self._stop_btn.setEnabled(False)
         tb.addWidget(self._start_btn)
@@ -469,6 +609,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(6)
 
         tree_header = QHBoxLayout()
         self._search_edit = QLineEdit()
@@ -500,6 +641,7 @@ class MainWindow(QMainWindow):
         right = QWidget()
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(6)
         rl.addWidget(self._live_view, 1)
         rl.addWidget(self._log_view)
 
@@ -516,6 +658,15 @@ class MainWindow(QMainWindow):
         self._msg_label = QLabel("Messages: 0")
         self._status.addWidget(self._status_label, 1)
         self._status.addPermanentWidget(self._msg_label)
+        # Frames arrive at 500-1000 fps — relayouting the label per frame
+        # dominated the per-frame UI cost. Update it on a timer instead.
+        self._msg_count = 0
+        self._msg_timer = QTimer(self)
+        self._msg_timer.timeout.connect(self._flush_msg_count)
+        self._msg_timer.start(250)
+
+    def _flush_msg_count(self):
+        self._msg_label.setText(f"Messages: {self._msg_count}")
 
     def _connect_all(self):
         self._start_btn.clicked.connect(self._start)
@@ -525,18 +676,14 @@ class MainWindow(QMainWindow):
         self._dbc_loader.error_occurred.connect(self._show_error)
 
         self._backend.message_received.connect(self._on_message)
-        self._backend.error_occurred.connect(
-            lambda m: self._status_label.setText(f"Error: {m}")
-        )
+        self._backend.error_occurred.connect(self._on_backend_error)
         self._backend.stopped.connect(self._on_stopped)
         self._backend.parse_progress.connect(self._on_parse_progress)
         self._backend.parsed_ready.connect(self._on_parsed_ready)
 
         self._live_view.cleared.connect(self._on_cleared)
         self._live_view.signal_label_clicked.connect(self._on_plot_label_clicked)
-        self._live_view.status_message.connect(
-            lambda m: self._status_label.setText(m)
-        )
+        self._live_view.status_message.connect(lambda m: self._status_label.setText(m))
 
         self._dbc_loader.model.itemChanged.connect(self._on_tree_check_changed)
 
@@ -572,8 +719,6 @@ class MainWindow(QMainWindow):
         self._dbc_loader.cascade_check_state(item)
         # debounce: batch rapid checkbox changes into a single sync
         if not hasattr(self, "_sync_timer"):
-            from PyQt5.QtCore import QTimer
-
             self._sync_timer = QTimer(self)
             self._sync_timer.setSingleShot(True)
             self._sync_timer.timeout.connect(self._sync_checked_signals)
@@ -699,9 +844,8 @@ class MainWindow(QMainWindow):
     def _start(self):
         channel = self._channel_combo.currentText()
         bitrate = int(self._bitrate_combo.currentText())
-        self._backend.start_live(channel=channel, bitrate=bitrate)
-        self._worker = CanWorker(self._backend)
-        self._worker.start()
+        if not self._backend.start_live(channel=channel, bitrate=bitrate):
+            return  # error already surfaced; keep the buttons usable
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
         self._status_label.setText(
@@ -712,14 +856,10 @@ class MainWindow(QMainWindow):
     def _stop(self):
         """Toolbar Stop — stops live capture or log playback."""
         mode = self._backend.mode()
-        if mode == 'playback':
+        if mode == "playback":
             self._stop_playback()
-        elif mode == 'live':
+        elif mode == "live":
             self._backend.stop()
-            if self._worker:
-                self._worker.stop()
-                self._worker.wait(2000)
-                self._worker = None
             self._live_view.flush_buffer()
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
@@ -728,10 +868,6 @@ class MainWindow(QMainWindow):
     def _stop_playback(self):
         """LogView Stop — stops local log parsing/replay only."""
         self._backend.stop()
-        if self._worker:
-            self._worker.stop()
-            self._worker.wait(2000)
-            self._worker = None
         self._live_view.flush_buffer()
         self._log_view.set_playing(False)
         self._status_label.setText("Playback stopped")
@@ -740,7 +876,7 @@ class MainWindow(QMainWindow):
         """Backend finished on its own (e.g. replay reached end of log)."""
         mode = self._backend.mode()
         self._live_view.flush_buffer()
-        if mode == 'live':
+        if mode == "live":
             self._start_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
         else:
@@ -751,14 +887,20 @@ class MainWindow(QMainWindow):
         self._msg_label.setText("Messages: 0")
 
     def _on_message(self, msg, decoded):
+        # Playback rows were already counted when the parse finished —
+        # counting them again would double the label.
+        if self._backend.mode() == "playback":
+            return
         self._msg_count += 1
-        self._msg_label.setText(f"Messages: {self._msg_count}")
 
     def _on_parse_progress(self, done, total):
         if total > 0:
             self._status_label.setText(
                 f"Parsing log... {done}/{total} ({done * 100 // total}%)"
             )
+        else:
+            # Streamed sources don't know the total up front — show the count.
+            self._status_label.setText(f"Parsing log... {done} frames")
 
     def _on_parsed_ready(self):
         # Bulk-load all checked signals from the pre-decoded index so the plot
@@ -795,6 +937,12 @@ class MainWindow(QMainWindow):
         self._log_view.set_playing(True)
         self._status_label.setText("Parsing log file...")
 
+    def _on_backend_error(self, msg):
+        self._status_label.setText(f"Error: {msg}")
+        # A failed parse leaves the LogView in "playing" state (Play disabled,
+        # Stop enabled) — restore the buttons so the user can retry.
+        self._log_view.set_playing(False)
+
     def _show_error(self, msg):
         QMessageBox.critical(self, "Error", msg)
 
@@ -813,22 +961,16 @@ class MainWindow(QMainWindow):
             self._backend.stop()
         except Exception:
             pass
-        if self._worker:
-            try:
-                self._worker.stop()
-                self._worker.wait(2000)
-            except Exception:
-                pass
-            self._worker = None
         super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
     # Dark palette as base (for any widgets not covered by QSS)
-    from PyQt5.QtGui import QColor, QPalette
+    from PyQt5.QtGui import QPalette
 
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor("#0f1117"))
@@ -849,29 +991,23 @@ def main():
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#484f58"))
     app.setPalette(palette)
 
+    # Segoe UI at 9pt (12px) is the Windows UI standard and matches the
+    # pixel sizes used throughout the stylesheet; YaHei covers CJK text.
     font = app.font()
-    font.setFamily("Segoe UI")
-    font.setPointSize(10)
+    if hasattr(font, "setFamilies"):
+        font.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Arial"])
+    else:
+        font.setFamily("Segoe UI")
+    font.setPointSize(9)
     app.setFont(font)
 
-    app.setStyleSheet(STYLESHEET + TITLE_BAR_STYLE)
+    app.setStyleSheet(build_stylesheet())
     icon_dir = os.path.dirname(os.path.abspath(__file__))
     icon_path = os.path.join(icon_dir, "can-bus.png")
     app_icon = QIcon(icon_path)
     app.setWindowIcon(app_icon)
     window = MainWindow()
     window.setWindowIcon(app_icon)
-
-    # Subtle glow shadow for the frameless window
-    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
-
-    shadow = QGraphicsDropShadowEffect(window)
-    shadow.setBlurRadius(40)
-    shadow_color = QColor("#1f6feb")
-    shadow_color.setAlpha(38)  # ~15% opacity (38/255)
-    shadow.setColor(shadow_color)
-    shadow.setOffset(0, 0)
-    window.setGraphicsEffect(shadow)
 
     window.show()
     sys.exit(app.exec_())
