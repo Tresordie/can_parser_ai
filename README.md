@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.4
+# CAN Bus Parser v0.1.5
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -104,10 +104,10 @@ Pre-built standalone executables can be generated via PyInstaller.
 ### Building from source
 
 ```bash
-pyinstaller --onefile --windowed --icon=can-bus.png --name "CAN_Bus_Parser" main.py
+pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" main.py
 ```
 
-Output will be in `dist/CAN_Bus_Parser/`.
+Output is the single file `dist/CAN_Bus_Parser.exe` (the `--add-data` flag is required: the app resolves its icon relative to the script directory, which inside a frozen build is the unpack bundle).
 
 ## Project Structure
 
@@ -168,6 +168,11 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.5 (2026-09-08)
+
+- **Fix:** Legend color swatches could show no color at all — rebuilding the legend while a highlight was active baked the dimmed line alpha into the handles permanently; handles now always keep full opacity and the active highlight's text styling is re-applied on rebuild
+- **Packaging:** Windows standalone build recipe fixed (`--add-data "can-bus.png;."` so the icon resolves inside a frozen onefile build)
 
 ### v0.1.4 (2026-09-08)
 

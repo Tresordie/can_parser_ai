@@ -2,6 +2,27 @@
 
 ---
 
+## v0.1.5 (2026-09-08) — 图例颜色修复 / Legend Color Fix
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 1. 图例颜色样本不显示颜色（中等）
+
+**问题：** 未选中任何曲线时，右上角图例中各 CAN ID 前的颜色样本几乎不可见（呈淡灰色），无法与曲线颜色对应。
+
+**原因：** 图例句柄是 `_rebuild_legend()` 时刻曲线属性的快照。常见触发路径：点击树中某信号高亮（其他曲线淡化至 alpha 0.12）→ 再勾选新信号 → 图例在淡化状态下重建，0.12 的透明度被永久烘焙进旧信号句柄；之后即使取消高亮、曲线恢复全色，图例句柄仍停留在淡化状态。
+
+**修复：** `_rebuild_legend()` 重建后强制所有句柄 alpha=1.0——图例始终显示真实颜色，选中状态改由文字粗体/着色表达；若重建时高亮仍激活，则把选中项的加粗/着色样式重新应用到新图例文字上，高亮状态不丢失。
+
+> 涉及文件：`signal_plot.py` — `_rebuild_legend()`
+
+### 📦 分发 / Distribution
+
+- 新增 Windows 独立运行包（PyInstaller onefile）：`CAN_Bus_Parser.exe`（约 68MB），未签名，首次运行需过 SmartScreen；实时采集仍需目标机器安装 PEAK 驱动
+- README 打包命令补充 `--add-data "can-bus.png;."`（冻结环境下图标资源定位依赖此参数）
+
+---
+
 ## v0.1.4 (2026-09-08) — Bug 修复、性能与健壮性 / Bug Fixes, Performance & Robustness
 
 ### 🐛 Bug 修复 / Bug Fixes

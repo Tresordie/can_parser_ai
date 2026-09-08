@@ -496,6 +496,22 @@ class SignalPlot(QWidget):
         self._legend.set_in_layout(False)
         for txt in self._legend.get_texts():
             txt.set_picker(True)
+        # Legend handles snapshot the line properties at build time. If the
+        # legend is rebuilt while a highlight is active, the dimmed alpha
+        # (0.12) of the other lines would be baked into their handles and the
+        # legend would show no color even after the highlight is cleared.
+        # Handles therefore always keep full opacity; the selection state is
+        # carried by the text styling below.
+        for h in self._legend.get_lines():
+            h.set_alpha(1.0)
+        if self._picked_line is not None:
+            label = self._picked_line.get_label()
+            for txt in self._legend.get_texts():
+                if txt.get_text() == label:
+                    txt.set_fontweight("bold")
+                    txt.set_color(self._picked_line.get_color())
+                else:
+                    txt.set_alpha(0.2)
 
     def add_signal_instance(self, can_id, sig_name):
         """Add a duplicate instance of an already-active signal."""

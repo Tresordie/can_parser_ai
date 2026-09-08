@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.4
+# CAN Bus Parser v0.1.5
 
 基于 PyQt5 + python-can + cantools 的 CAN 总线数据采集与离线分析桌面工具。
 
@@ -104,10 +104,10 @@ Messages / Signals
 ### 从源码构建
 
 ```bash
-pyinstaller --onefile --windowed --icon=can-bus.png --name "CAN_Bus_Parser" main.py
+pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" main.py
 ```
 
-构建产物在 `dist/CAN_Bus_Parser/` 目录下。
+构建产物为单文件 `dist/CAN_Bus_Parser.exe`（`--add-data` 参数必不可少：应用按脚本所在目录定位图标资源，冻结环境下即解包临时目录）。
 
 ## 项目结构
 
@@ -168,6 +168,11 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 ## 版本历史
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
+
+### v0.1.5 (2026-09-08)
+
+- **修复：** 图例颜色样本不显示颜色——高亮激活期间重建图例会把淡化后的透明度永久烘焙进句柄；现句柄恒为全不透明，重建时重新套用当前高亮的文字样式
+- **打包：** Windows 独立包构建命令补充 `--add-data "can-bus.png;."`（冻结环境图标资源定位所需）
 
 ### v0.1.4 (2026-09-08)
 
