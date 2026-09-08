@@ -1,5 +1,8 @@
 """CAN Bus Parser GUI — main entry point."""
 
+__version__ = "0.1.6"
+APP_TITLE = f"CAN Bus Parser v{__version__}"
+
 import os
 import sys
 import tempfile
@@ -452,7 +455,7 @@ class _TitleBar(QWidget):
             icon_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(icon_label)
 
-        self._icon = QLabel("CAN Bus Parser")
+        self._icon = QLabel(APP_TITLE)
         self._icon.setObjectName("titleLabel")
         self._icon.setMinimumHeight(36)
         layout.addWidget(self._icon, 1)
@@ -513,7 +516,7 @@ class _TitleBar(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(None, Qt.FramelessWindowHint)
-        self.setWindowTitle("CAN Bus Parser")
+        self.setWindowTitle(APP_TITLE)
         self.resize(1400, 900)
         self.setMinimumSize(900, 600)
 

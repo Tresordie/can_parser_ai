@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.5
+# CAN Bus Parser v0.1.6
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -168,6 +168,10 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.6 (2026-09-08)
+
+- **Feature:** The title bar and window title now show the app version ("CAN Bus Parser v0.1.6"); `__version__` in `main.py` is the single source of truth, so future releases only need one edit
 
 ### v0.1.5 (2026-09-08)
 

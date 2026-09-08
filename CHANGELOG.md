@@ -2,6 +2,20 @@
 
 ---
 
+## v0.1.6 (2026-09-08) — 标题栏版本号 / Title Bar Version
+
+### ✨ 新增功能 / New Features
+
+#### 1. 标题栏显示版本号
+
+**需求：** 分发出去的 exe 无法直观确认是哪个版本，排查用户问题时难以对应。
+
+**方案：** `main.py` 新增 `__version__` 常量作为版本唯一来源，自绘标题栏文本与窗口标题（任务栏悬停提示）统一显示 `CAN Bus Parser v<版本号>`。今后发版只需修改 `__version__` 一处，界面与打包产物自动同步。
+
+> 涉及文件：`main.py` — `__version__`, `APP_TITLE`, `_TitleBar`, `MainWindow.__init__`
+
+---
+
 ## v0.1.5 (2026-09-08) — 图例颜色修复 / Legend Color Fix
 
 ### 🐛 Bug 修复 / Bug Fixes

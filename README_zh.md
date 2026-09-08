@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.5
+# CAN Bus Parser v0.1.6
 
 基于 PyQt5 + python-can + cantools 的 CAN 总线数据采集与离线分析桌面工具。
 
@@ -168,6 +168,10 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 ## 版本历史
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
+
+### v0.1.6 (2026-09-08)
+
+- **新增：** 标题栏与窗口标题显示版本号（"CAN Bus Parser v0.1.6"）；`main.py` 中的 `__version__` 常量为版本唯一来源，今后发版只需改这一处
 
 ### v0.1.5 (2026-09-08)
 
