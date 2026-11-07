@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.6
+# CAN Bus Parser v0.1.7
 
 基于 PyQt5 + python-can + cantools 的 CAN 总线数据采集与离线分析桌面工具。
 
@@ -104,10 +104,17 @@ Messages / Signals
 ### 从源码构建
 
 ```bash
-pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" main.py
+pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" \
+  --exclude-module torch --exclude-module torchaudio --exclude-module torchvision \
+  --exclude-module torchgen --exclude-module functorch \
+  --exclude-module sentencepiece --exclude-module numba --exclude-module llvmlite \
+  --exclude-module sympy --exclude-module mpmath --exclude-module networkx \
+  --exclude-module pandas --exclude-module scipy --exclude-module openpyxl --exclude-module xlsxwriter \
+  --exclude-module win32com --exclude-module pywin \
+  main.py
 ```
 
-构建产物为单文件 `dist/CAN_Bus_Parser.exe`（`--add-data` 参数必不可少：应用按脚本所在目录定位图标资源，冻结环境下即解包临时目录）。
+构建产物为单文件 `dist/CAN_Bus_Parser.exe`（`--add-data` 参数必不可少：应用按脚本所在目录定位图标资源，冻结环境下即解包临时目录）。`--exclude-module` 参数在装有 ML 类库（torch 等）的开发环境中必不可少：否则 PyInstaller 依赖扫描会把无关大包拖进依赖图，导致构建爆炸或直接失败——应用本身只需 PyQt5、python-can、cantools、matplotlib 和 numpy。
 
 ## 项目结构
 
@@ -168,6 +175,10 @@ message_received 信号 ──→ LiveView 缓冲 ──→ 数据表 + 信号�
 ## 版本历史
 
 详见 [CHANGELOG.md](CHANGELOG.md) 了解完整版本发布记录。
+
+### v0.1.7 (2026-11-07)
+
+- **修复：** PCAN 实时采集收到第一帧解码报文即闪退（`_flush_buffer` 中遗留的 `plot` 引用触发 `NameError`，v0.1.4 引入的回归）；回放模式不受影响，调用已改为 `self._plot`
 
 ### v0.1.6 (2026-09-08)
 

@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.6
+# CAN Bus Parser v0.1.7
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -104,10 +104,17 @@ Pre-built standalone executables can be generated via PyInstaller.
 ### Building from source
 
 ```bash
-pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" main.py
+pyinstaller --onefile --windowed --icon=can-bus.png --add-data "can-bus.png;." --name "CAN_Bus_Parser" \
+  --exclude-module torch --exclude-module torchaudio --exclude-module torchvision \
+  --exclude-module torchgen --exclude-module functorch \
+  --exclude-module sentencepiece --exclude-module numba --exclude-module llvmlite \
+  --exclude-module sympy --exclude-module mpmath --exclude-module networkx \
+  --exclude-module pandas --exclude-module scipy --exclude-module openpyxl --exclude-module xlsxwriter \
+  --exclude-module win32com --exclude-module pywin \
+  main.py
 ```
 
-Output is the single file `dist/CAN_Bus_Parser.exe` (the `--add-data` flag is required: the app resolves its icon relative to the script directory, which inside a frozen build is the unpack bundle).
+Output is the single file `dist/CAN_Bus_Parser.exe` (the `--add-data` flag is required: the app resolves its icon relative to the script directory, which inside a frozen build is the unpack bundle). The `--exclude-module` flags are required in a dev environment that also has ML packages installed (torch etc.): PyInstaller's dependency scan would otherwise pull them in and bloat or crash the build — the app itself only needs PyQt5, python-can, cantools, matplotlib and numpy.
 
 ## Project Structure
 
@@ -168,6 +175,10 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.7 (2026-11-07)
+
+- **Fix:** Live PCAN capture crashed as soon as the first decoded frame arrived (`NameError` from a stale `plot` reference in `_flush_buffer`, a v0.1.4 regression); playback was unaffected. The call now uses `self._plot`
 
 ### v0.1.6 (2026-09-08)
 

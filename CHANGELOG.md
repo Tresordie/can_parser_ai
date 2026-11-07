@@ -2,6 +2,26 @@
 
 ---
 
+## v0.1.7 (2026-11-07) — PCAN 实时采集崩溃修复 / Live Capture Crash Fix
+
+### 🐛 Bug 修复 / Bug Fixes
+
+#### 1. PCAN 在线接收并解析报文时程序闪退（严重）
+
+**问题：** 连接 PCAN 实时采集时，只要勾选了信号且收到第一帧可解码的报文，程序立即崩溃退出；离线日志回放不受影响。
+
+**原因：** v0.1.4 重构 `_flush_buffer()`（加入 `feed_plot` 回放守卫）时误删了局部别名 `plot = self._plot`，但保留了对 `plot` 的调用。回放模式下 `feed_plot` 为 False 永远不执行该行，故离线一直正常；实时模式下第一帧解码即触发 `NameError`，且异常发生在 Qt 定时器槽内，PyQt5 ≥5.5 默认直接终止进程。
+
+**修复：** 调用处改为 `self._plot.add_point(...)`；离屏冒烟测试（模拟 live 模式喂帧）验证不再抛异常，表格与绘图均正常收到数据。
+
+> 涉及文件：`live_view.py` — `_flush_buffer()`
+
+### 📦 分发 / Distribution
+
+- 重新打包 Windows 独立运行包（PyInstaller onefile）：`CAN_Bus_Parser.exe`（约 69MB）。开发环境新装的 ML 类库（torch 等）会被 PyInstaller 依赖扫描拖入导致构建失败，打包命令新增 `--exclude-module` 排除参数（已同步到 README）
+
+---
+
 ## v0.1.6 (2026-09-08) — 标题栏版本号 / Title Bar Version
 
 ### ✨ 新增功能 / New Features

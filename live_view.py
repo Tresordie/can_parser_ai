@@ -368,7 +368,7 @@ class LiveView(QWidget):
                 for can_id, sig_name, _sig in self._checked_signals:
                     val = decoded.get(sig_name)
                     if val is not None:
-                        plot.add_point(ts, can_id, sig_name, val)
+                        self._plot.add_point(ts, can_id, sig_name, val)
 
             # Always keep the row (even when has_value is False) so the
             # timestamp sequence stays continuous for multiplexed messages

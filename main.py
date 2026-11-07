@@ -1,6 +1,6 @@
 """CAN Bus Parser GUI — main entry point."""
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 APP_TITLE = f"CAN Bus Parser v{__version__}"
 
 import os
