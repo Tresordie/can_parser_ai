@@ -1,4 +1,4 @@
-# CAN Bus Parser v0.1.7
+# CAN Bus Parser v0.1.8
 
 A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and offline analysis.
 
@@ -10,7 +10,7 @@ A PyQt5 + python-can + cantools desktop tool for CAN bus data acquisition and of
 |--------|-------------|
 | **Live Capture** | Real-time CAN message reading via PCAN hardware with automatic DBC decoding |
 | **Offline Playback** | Replay ASC / BLF / TRC / CSV (signal) / CSV (SavvyCAN frame) log formats |
-| **Signal Selection** | Tree view of all messages and signals after DBC load, with search and batch select |
+| **Signal Selection** | Tree view of all messages and signals after DBC load, with search, batch select, and a Selected-Only filter that collapses the tree down to the checked items |
 | **Data Table** | Real-time scrolling table of selected signal values, with CSV export |
 | **Signal Plot** | Interactive time-series plot with zoom, pan, axis lock, legend highlight, and hover tooltip |
 
@@ -59,7 +59,7 @@ Messages / Signals
 └── ...
 ```
 
-Check the signals you want to monitor. Use the search box to filter by name or CAN ID.
+Check the signals you want to monitor. Use the search box to filter by name or CAN ID, and tick **Selected Only** to collapse the tree down to just the checked messages and signals.
 
 ### 2. Live Capture
 
@@ -175,6 +175,10 @@ message_received signal ──→ LiveView buffer ──→ Data Table + Signal 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for full details.
+
+### v0.1.8 (2026-11-20)
+
+- **Feature:** New **Selected Only** checkbox next to the search box in the Messages/Signals tree — when ticked, the tree collapses down to exactly the checked selection: messages without checked signals are hidden, unchecked signals are hidden, and `[mux=N]` groups only stay visible when they contain checked signals. Combines with the search box; checking/unchecking (including legend-click sync and Select All / Deselect All) refreshes the filtered tree live; unticking restores the full tree
 
 ### v0.1.7 (2026-11-07)
 

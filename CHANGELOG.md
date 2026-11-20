@@ -2,6 +2,28 @@
 
 ---
 
+## v0.1.8 (2026-11-20) — 信号树"仅显已选"过滤 / Selected-Only Tree Filter
+
+### ✨ 新增功能 / New Features
+
+#### 1. Messages/Signals 树新增 "Selected Only" 过滤开关
+
+**需求：** DBC 报文较多时，已勾选的信号散落在长列表中，难以一眼确认当前到底选了哪些 Messages/Signals。
+
+**方案：** 左侧 Messages/Signals 树的搜索框旁新增 **Selected Only** 复选框。勾选后树收敛为只显示已勾选的内容：
+
+- 只显示含有已勾选信号的消息，没有勾选信号的消息整行隐藏；
+- 只显示勾选的信号，未勾选的隐藏；
+- `[mux=N]` 分组只在该组内有勾选信号时显示，未勾选的 `[MUX]` 信号行同样隐藏。
+
+实现上把原 `_on_search` 重构为通用的 `_apply_filters()`（`main.py`），搜索关键字与 Selected Only 两条规则合并计算（信号需同时满足"已勾选"与"匹配搜索"），两者都关闭时走原"全部显示"快速路径，行为与旧版完全一致。过滤开启时勾选/取消勾选（含图例点击联动勾选、Select All / Deselect All）通过既有 `_sync_checked_signals` 防抖同步即时刷新树显示；开启开关时自动展开树便于查看选中项。
+
+**验证：** 离屏（`QT_QPA_PLATFORM=offscreen`）无头 UI 测试覆盖 8 个场景全部通过：无过滤全显、全不勾选全隐藏、勾选单信号只显示其消息、mux 分组只显示勾选成员、搜索与过滤叠加、Select All / Deselect All 联动、关闭开关恢复完整树。
+
+> 涉及文件：`main.py` — `_apply_filters()`, `_row_visible()`, `_on_search()`, `_on_selected_only_toggled()`, `_sync_checked_signals()`, `Selected Only` 复选框
+
+---
+
 ## v0.1.7 (2026-11-07) — PCAN 实时采集崩溃修复 / Live Capture Crash Fix
 
 ### 🐛 Bug 修复 / Bug Fixes

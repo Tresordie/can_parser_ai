@@ -1,6 +1,6 @@
 """CAN Bus Parser GUI — main entry point."""
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 APP_TITLE = f"CAN Bus Parser v{__version__}"
 
 import os
@@ -11,6 +11,7 @@ from PyQt5.QtCore import QPointF, QSize, Qt, QTimer
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -618,6 +619,10 @@ class MainWindow(QMainWindow):
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("Search signals...")
         tree_header.addWidget(self._search_edit)
+        self._selected_only_chk = QCheckBox("Selected Only")
+        self._selected_only_chk.setToolTip(
+            "Show only the checked Messages / Signals")
+        tree_header.addWidget(self._selected_only_chk)
         ll.addLayout(tree_header)
 
         btn_layout = QHBoxLayout()
@@ -691,6 +696,7 @@ class MainWindow(QMainWindow):
         self._dbc_loader.model.itemChanged.connect(self._on_tree_check_changed)
 
         self._search_edit.textChanged.connect(self._on_search)
+        self._selected_only_chk.toggled.connect(self._on_selected_only_toggled)
         self._select_all_btn.clicked.connect(self._on_select_all)
         self._deselect_all_btn.clicked.connect(self._on_deselect_all)
 
@@ -711,12 +717,16 @@ class MainWindow(QMainWindow):
         self._tree_view.expandAll()
         self._sync_checked_signals()
         self._status_label.setText(f"DBC loaded: {len(db.messages)} messages")
-        self._on_search(self._search_edit.text())
+        self._apply_filters()
 
     def _sync_checked_signals(self):
         checked = self._dbc_loader.get_checked_signals()
         self._backend.set_checked_signals(checked)
         self._live_view.refresh_signals(checked)
+        # Re-run the tree filters so that with Selected-Only active a newly
+        # checked signal (and its message) appears immediately, and an
+        # unchecked one disappears.
+        self._apply_filters()
 
     def _on_tree_check_changed(self, item):
         self._dbc_loader.cascade_check_state(item)
@@ -729,12 +739,33 @@ class MainWindow(QMainWindow):
         self._sync_timer.start(80)
 
     def _on_search(self, text):
-        text = text.strip().lower()
-        model = self._dbc_loader.model
-        ITEM_TYPE_MUX_GROUP = self._dbc_loader.ITEM_TYPE_MUX_GROUP
+        if text.strip():
+            self._tree_view.expandAll()
+        self._apply_filters()
 
-        if not text:
-            # Unhide everything (including mux-group sub-rows)
+    def _on_selected_only_toggled(self, checked):
+        if checked:
+            self._tree_view.expandAll()
+        self._apply_filters()
+
+    def _apply_filters(self):
+        """Apply the search text and the Selected-Only toggle to the tree.
+
+        The two filters combine: a signal row stays visible when it (or its
+        message) matches the search text and — when Selected-Only is on — is
+        checked; a message row stays visible when it has a visible child or,
+        with Selected-Only off, matches the search itself. Selected-Only also
+        hides the mux-group and message scaffolding around unchecked signals
+        so the tree collapses down to exactly the checked selection.
+        """
+        text = self._search_edit.text().strip().lower()
+        selected_only = self._selected_only_chk.isChecked()
+        loader = self._dbc_loader
+        model = loader.model
+        ITEM_TYPE_MUX_GROUP = loader.ITEM_TYPE_MUX_GROUP
+
+        if not text and not selected_only:
+            # No filters — unhide everything (including mux-group sub-rows)
             for row in range(model.rowCount()):
                 msg_item = model.item(row)
                 self._tree_view.setRowHidden(
@@ -743,51 +774,75 @@ class MainWindow(QMainWindow):
                 for cr in range(msg_item.rowCount()):
                     child = msg_item.child(cr)
                     self._tree_view.setRowHidden(cr, msg_item.index(), False)
-                    if child.data(self._dbc_loader.CHECKED_ROLE) == ITEM_TYPE_MUX_GROUP:
+                    if child.data(loader.CHECKED_ROLE) == ITEM_TYPE_MUX_GROUP:
                         for sr in range(child.rowCount()):
                             self._tree_view.setRowHidden(sr, child.index(), False)
             return
 
-        self._tree_view.expandAll()
         for row in range(model.rowCount()):
             msg_item = model.item(row)
-            can_id = msg_item.data(self._dbc_loader.CAN_ID_ROLE)
+            can_id = msg_item.data(loader.CAN_ID_ROLE)
             msg_match = (
-                text in msg_item.text().lower() or text in f"0x{can_id:03x}".lower()
+                not text
+                or text in msg_item.text().lower()
+                or text in f"0x{can_id:03x}".lower()
             )
-            any_child_match = False
+            any_child_visible = False
             for cr in range(msg_item.rowCount()):
                 child = msg_item.child(cr)
-                child_type = child.data(self._dbc_loader.CHECKED_ROLE)
+                child_type = child.data(loader.CHECKED_ROLE)
 
                 if child_type == ITEM_TYPE_MUX_GROUP:
-                    # Search inside the mux group
-                    group_match = False
+                    # Filter inside the mux group
+                    group_visible = False
                     for sr in range(child.rowCount()):
-                        sig_item = child.child(sr)
-                        sig_match = text in sig_item.text().lower()
-                        self._tree_view.setRowHidden(
-                            sr, child.index(), not sig_match and not msg_match
+                        sig_visible = self._row_visible(
+                            child.child(sr), msg_match, text, selected_only
                         )
-                        group_match = group_match or sig_match
-                    # Show/hide the mux group itself
-                    self._tree_view.setRowHidden(
-                        cr, msg_item.index(), not group_match and not msg_match
+                        self._tree_view.setRowHidden(
+                            sr, child.index(), not sig_visible
+                        )
+                        group_visible = group_visible or sig_visible
+                    # The group node itself is not checkable — show it when
+                    # it holds a visible signal, or (Selected-Only off) when
+                    # the message matches the search text.
+                    group_visible = group_visible or (
+                        msg_match and not selected_only
                     )
-                    any_child_match = any_child_match or group_match
+                    self._tree_view.setRowHidden(
+                        cr, msg_item.index(), not group_visible
+                    )
+                    any_child_visible = any_child_visible or group_visible
                 else:
                     # Direct signal child (plain signal or [MUX] signal)
-                    sig_match = text in child.text().lower()
-                    self._tree_view.setRowHidden(
-                        cr, msg_item.index(), not sig_match and not msg_match
+                    sig_visible = self._row_visible(
+                        child, msg_match, text, selected_only
                     )
-                    any_child_match = any_child_match or sig_match
+                    self._tree_view.setRowHidden(
+                        cr, msg_item.index(), not sig_visible
+                    )
+                    any_child_visible = any_child_visible or sig_visible
 
+            # Selected-Only: a message is kept only when it actually has a
+            # checked signal; otherwise search rules apply (self match or
+            # child match).
+            msg_visible = any_child_visible or (
+                msg_match and not selected_only
+            )
             self._tree_view.setRowHidden(
                 row,
                 model.invisibleRootItem().index(),
-                not msg_match and not any_child_match,
+                not msg_visible,
             )
+
+    def _row_visible(self, item, msg_match, text, selected_only):
+        """Whether one signal row passes the combined search + Selected-Only
+        filters."""
+        if selected_only and item.checkState() != Qt.Checked:
+            return False
+        if not text:
+            return True
+        return text in item.text().lower() or msg_match
 
     def _on_select_all(self):
         self._dbc_loader.select_all()
